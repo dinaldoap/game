@@ -1,0 +1,10 @@
+default_context:
+  full_name: "Dinaldo A. Pessoa"
+  email: "dinaldoap@gmail.com"
+  github_username: "dinaldoap"
+  project_name: "Game"
+  project_slug: "game"
+  project_slug_underscore: "game"
+  project_slug_pypi: "game"
+  project_slug_entrypoint: "game"
+  project_short_description: "Game for M5 Stick"
