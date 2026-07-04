@@ -80,14 +80,13 @@ HTML_PAGE = """<!DOCTYPE html>
         const ACCEL_DEADZONE = 0.08;       // Ignores micro-leaning (G-force shift)
         const ACCEL_WEIGHT = 100.0;        // Multiplier to make Accel data scale similarly to Gyro data
         const PENALTY_MULTIPLIER = 1.0;    // Final score drain speed
-        const AUDIO_TENSION_SENSITIVITY = 150; 
 
         let maxScore = 10000, currentScore = maxScore, timeLeft = 30, isPlaying = false;
         let gameLoopInterval, imuTimeout, baseline = null; 
         let lastStumpTime = 0; 
         let stableFrames = 0; 
         
-        let audioCtx, droneOsc, droneFilter, droneGain;
+        let audioCtx;
 
         function initAudio() {
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -106,38 +105,6 @@ HTML_PAGE = """<!DOCTYPE html>
             gain.connect(audioCtx.destination);
             osc.start();
             osc.stop(audioCtx.currentTime + duration);
-        }
-
-        function startTensionBGM() {
-            if(!audioCtx) return;
-            droneOsc = audioCtx.createOscillator();
-            droneOsc.type = 'sawtooth';
-            droneOsc.frequency.value = 110; 
-            droneFilter = audioCtx.createBiquadFilter();
-            droneFilter.type = 'lowpass';
-            droneFilter.frequency.value = 250; 
-            droneGain = audioCtx.createGain();
-            droneGain.gain.value = 0.15; 
-            droneOsc.connect(droneFilter);
-            droneFilter.connect(droneGain);
-            droneGain.connect(audioCtx.destination);
-            droneOsc.start();
-        }
-
-        function updateTension(movement) {
-            if (!audioCtx || !droneFilter) return;
-            let targetFreq = 250 + (movement * AUDIO_TENSION_SENSITIVITY);
-            if (targetFreq > 2000) targetFreq = 2000;
-            let targetPitch = 110 + (movement * 2);
-            droneFilter.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.1);
-            droneOsc.frequency.setTargetAtTime(targetPitch, audioCtx.currentTime, 0.1);
-        }
-
-        function stopTensionBGM() { 
-            if (droneOsc) {
-                droneGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-                droneOsc.stop(audioCtx.currentTime + 0.3);
-            }
         }
         
         const screens = { home: document.getElementById('screen-home'), calibrating: document.getElementById('screen-calibrating'), game: document.getElementById('screen-game'), results: document.getElementById('screen-results') };
@@ -194,8 +161,6 @@ HTML_PAGE = """<!DOCTYPE html>
             bubble.style.left = '50%';
             bubble.style.top = '50%';
 
-            startTensionBGM(); 
-
             gameLoopInterval = setInterval(() => { 
                 timeLeft--; 
                 timerText.innerText = timeLeft; 
@@ -218,7 +183,6 @@ HTML_PAGE = """<!DOCTYPE html>
                 // Network drop fail-safe
                 bubble.style.left = `50%`; 
                 bubble.style.top = `50%`;
-                updateTension(0);
                 return; 
             }
             
@@ -252,7 +216,6 @@ HTML_PAGE = """<!DOCTYPE html>
             if (accelShift < ACCEL_DEADZONE) accelShift = 0;
             
             // 5. SENSOR FUSION: Combine the punished values
-            // We multiply accelShift to bring its tiny 0.0-1.0 scale up to match the gyro scale
             let combinedMovement = gyroWobble + (accelShift * ACCEL_WEIGHT);
             
             if (combinedMovement > 0) {
@@ -261,7 +224,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 
                 const now = Date.now();
                 if (combinedMovement > (GYRO_DEADZONE * 3) && (now - lastStumpTime > 300)) {
-                    playTone(150, 'sawtooth', 0.1, 0.05);
+                    playTone(150, 'sawtooth', 0.1, 0.05); // Play brief error sound
                     lastStumpTime = now;
                 }
                 
@@ -274,8 +237,6 @@ HTML_PAGE = """<!DOCTYPE html>
                 bubble.style.left = `50%`; 
                 bubble.style.top = `50%`;
             }
-            
-            updateTension(combinedMovement);
         }
 
         function endGame() {
@@ -283,8 +244,7 @@ HTML_PAGE = """<!DOCTYPE html>
             clearInterval(gameLoopInterval); 
             clearTimeout(imuTimeout); 
             
-            stopTensionBGM(); 
-            playTone(150, 'square', 0.8, 0.2); 
+            playTone(150, 'square', 0.8, 0.2); // Game over sound
             
             document.getElementById('final-score').innerText = currentScore;
             const b = document.getElementById('performance-badge');
@@ -325,7 +285,6 @@ class MPU6886:
             return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
             
         try:
-            # Read 14 bytes to grab BOTH Accel and Gyro at exactly the same time
             data = self.i2c.readfrom_mem(self.addr, 0x3B, 14)
             
             def to_signed(msb, lsb):
@@ -340,7 +299,6 @@ class MPU6886:
             raw_gy = to_signed(data[10], data[11]) / 16.4
             raw_gz = to_signed(data[12], data[13]) / 16.4
             
-            # Smooth out electronic noise on all axes
             self.f_ax = (self.alpha * raw_ax) + ((1.0 - self.alpha) * self.f_ax)
             self.f_ay = (self.alpha * raw_ay) + ((1.0 - self.alpha) * self.f_ay)
             self.f_az = (self.alpha * raw_az) + ((1.0 - self.alpha) * self.f_az)
@@ -417,7 +375,6 @@ def main():
                 continue
                 
             if request.startswith('GET /data'):
-                # Grab all 6 values
                 ax, ay, az, gx, gy, gz = imu.get_data()
                 
                 response_data = json.dumps({
