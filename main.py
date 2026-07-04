@@ -75,17 +75,17 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <script>
-        // ==========================================
-        // TWEAK THESE VARIABLES TO FINE TUNE SENSITIVITY
-        // ==========================================
-        const GYRO_DEADZONE = 3.0;        // Minimum rotation (degrees/sec) to register as movement. Increase to ignore minor hand shakes.
-        const PENALTY_MULTIPLIER = 1.0;  // How many points to deduct per degree of wobble. Increase to make the game harder.
-        const AUDIO_TENSION_SENSITIVITY = 150; // How quickly the background drone sound gets high-pitched.
-        // ==========================================
+        // --- FUSION TUNING PARAMETERS ---
+        const GYRO_DEADZONE = 3.0;         // Ignores micro-wobbles (degrees/sec)
+        const ACCEL_DEADZONE = 0.08;       // Ignores micro-leaning (G-force shift)
+        const ACCEL_WEIGHT = 100.0;        // Multiplier to make Accel data scale similarly to Gyro data
+        const PENALTY_MULTIPLIER = 1.0;    // Final score drain speed
+        const AUDIO_TENSION_SENSITIVITY = 150; 
 
         let maxScore = 10000, currentScore = maxScore, timeLeft = 30, isPlaying = false;
-        let gameLoopInterval, imuInterval, baseline = null, previousData = null; 
+        let gameLoopInterval, imuTimeout, baseline = null; 
         let lastStumpTime = 0; 
+        let stableFrames = 0; 
         
         let audioCtx, droneOsc, droneFilter, droneGain;
 
@@ -147,11 +147,11 @@ HTML_PAGE = """<!DOCTYPE html>
 
         async function fetchIMU() {
             try {
-                const res = await fetch('/data', { signal: AbortSignal.timeout(500) });
+                const res = await fetch('/data', { signal: AbortSignal.timeout(200) });
                 if (!res.ok) throw new Error("Network response was not ok");
                 return await res.json();
             } catch (e) { 
-                return previousData || { gx: 0, gy: 0, gz: 0 }; 
+                return null; 
             }
         }
 
@@ -169,8 +169,12 @@ HTML_PAGE = """<!DOCTYPE html>
                     playTone(440, 'square', 0.2, 0.1);
                 } else { 
                     clearInterval(iv); 
-                    baseline = await fetchIMU(); 
-                    previousData = baseline; 
+                    
+                    baseline = null;
+                    while(!baseline) {
+                        baseline = await fetchIMU();
+                    }
+                    
                     playTone(880, 'square', 0.5, 0.15); 
                     startGame(); 
                 }
@@ -183,6 +187,7 @@ HTML_PAGE = """<!DOCTYPE html>
             timeLeft = 30; 
             currentScore = maxScore;
             lastStumpTime = 0;
+            stableFrames = 0;
             
             liveScoreText.innerText = currentScore;
             timerText.innerText = timeLeft;
@@ -196,58 +201,87 @@ HTML_PAGE = """<!DOCTYPE html>
                 timerText.innerText = timeLeft; 
                 if (timeLeft <= 0) endGame(); 
             }, 1000);
-            imuInterval = setInterval(processIMU, 100);
+            
+            pollIMU(); 
+        }
+
+        async function pollIMU() {
+            if (!isPlaying) return;
+            await processIMU();
+            imuTimeout = setTimeout(pollIMU, 80); 
         }
 
         async function processIMU() {
-            if (!isPlaying) return;
             const data = await fetchIMU();
-            if (!baseline || !previousData) { baseline = data; previousData = data; }
             
-            // Subtract baseline to remove hardware bias
+            if (!data) {
+                // Network drop fail-safe
+                bubble.style.left = `50%`; 
+                bubble.style.top = `50%`;
+                updateTension(0);
+                return; 
+            }
+            
+            if (!baseline) { baseline = data; }
+            
+            // 1. Calculate Gyro Wobble (Fast Shakes)
             const gX = data.gx - baseline.gx;
             const gY = data.gy - baseline.gy;
             const gZ = data.gz - baseline.gz;
+            let gyroWobble = Math.sqrt(gX*gX + gY*gY + gZ*gZ);
             
-            // Calculate total angular velocity magnitude (how fast are we rotating?)
-            let gyroMovement = Math.sqrt(gX*gX + gY*gY + gZ*gZ);
-            
-            // Deadzone Check
-            if (gyroMovement < GYRO_DEADZONE) {
-                gyroMovement = 0;
+            // 2. Calculate Accel Shift (Slow Leaning/Posture change)
+            const aX = data.ax - baseline.ax;
+            const aY = data.ay - baseline.ay;
+            const aZ = data.az - baseline.az;
+            let accelShift = Math.sqrt(aX*aX + aY*aY + aZ*aZ);
+
+            // 3. Auto-Zero Logic (Must be stable on BOTH sensors)
+            if (gyroWobble < 1.5 && accelShift < 0.05) {
+                stableFrames++;
+                if (stableFrames > 15) {
+                    baseline = data; // Reset completely to current posture
+                    stableFrames = 0; 
+                }
+            } else {
+                stableFrames = 0; 
             }
+
+            // 4. Apply Deadzones
+            if (gyroWobble < GYRO_DEADZONE) gyroWobble = 0;
+            if (accelShift < ACCEL_DEADZONE) accelShift = 0;
             
-            if (gyroMovement > 0) {
-                // Deduct points based on the severity of the wobble
-                currentScore = Math.max(0, currentScore - Math.floor(gyroMovement * PENALTY_MULTIPLIER));
+            // 5. SENSOR FUSION: Combine the punished values
+            // We multiply accelShift to bring its tiny 0.0-1.0 scale up to match the gyro scale
+            let combinedMovement = gyroWobble + (accelShift * ACCEL_WEIGHT);
+            
+            if (combinedMovement > 0) {
+                currentScore = Math.max(0, currentScore - Math.floor(combinedMovement * PENALTY_MULTIPLIER));
                 liveScoreText.innerText = currentScore;
                 
-                // Play audio stump if wobble is severe (and respect 300ms cooldown)
                 const now = Date.now();
-                if (gyroMovement > (GYRO_DEADZONE * 3) && (now - lastStumpTime > 300)) {
+                if (combinedMovement > (GYRO_DEADZONE * 3) && (now - lastStumpTime > 300)) {
                     playTone(150, 'sawtooth', 0.1, 0.05);
                     lastStumpTime = now;
                 }
                 
-                // UI: Make bubble jitter off-center based on active rotation
-                let xPos = 50 + (gY * 0.8); 
-                let yPos = 50 + (gX * 0.8); 
+                // UI: Bubble reacts to Gyro for jitter, and Accel for drifting off center
+                let xPos = 50 + (gY * 0.5) + (aX * 40); 
+                let yPos = 50 + (gX * 0.5) + (aY * 40); 
                 bubble.style.left = `${Math.max(5, Math.min(95, xPos))}%`; 
                 bubble.style.top = `${Math.max(5, Math.min(95, yPos))}%`;
             } else {
-                // UI: Return bubble smoothly to center when perfectly stable
                 bubble.style.left = `50%`; 
                 bubble.style.top = `50%`;
             }
             
-            updateTension(gyroMovement);
-            previousData = data; 
+            updateTension(combinedMovement);
         }
 
         function endGame() {
             isPlaying = false; 
             clearInterval(gameLoopInterval); 
-            clearInterval(imuInterval);
+            clearTimeout(imuTimeout); 
             
             stopTensionBGM(); 
             playTone(150, 'square', 0.8, 0.2); 
@@ -265,57 +299,60 @@ HTML_PAGE = """<!DOCTYPE html>
 </html>"""
 
 # ==========================================
-# MPU6886 GYROSCOPE ONLY DRIVER
+# MPU6886 FULL 6-AXIS DRIVER
 # ==========================================
 class MPU6886:
     def __init__(self, i2c):
         self.i2c = i2c
         self.addr = 0x68
+        self.alpha = 0.3 # Global Low-Pass Filter
         
-        # SENSOR NOISE FILTER
-        # A value of 1.0 means no smoothing (instant reaction but jittery).
-        # A value closer to 0.0 means heavy smoothing (sluggish but stable).
-        self.alpha = 0.3
-        
-        self.f_gx = 0.0
-        self.f_gy = 0.0
-        self.f_gz = 0.0
+        self.f_ax, self.f_ay, self.f_az = 0.0, 0.0, 1.0
+        self.f_gx, self.f_gy, self.f_gz = 0.0, 0.0, 0.0
 
         try:
-            self.i2c.writeto_mem(self.addr, 0x6B, b'\x00') # Wake up
+            self.i2c.writeto_mem(self.addr, 0x6B, b'\x00') # Wake
             time.sleep_ms(10)
-            self.i2c.writeto_mem(self.addr, 0x1B, b'\x18') # Gyro Config: 2000 dps
+            self.i2c.writeto_mem(self.addr, 0x1C, b'\x10') # Accel 8G
+            self.i2c.writeto_mem(self.addr, 0x1B, b'\x18') # Gyro 2000 dps
             self.connected = True
         except OSError:
             self.connected = False
             print("MPU6886 not found. Running in simulation mode.")
 
-    def get_gyro(self):
+    def get_data(self):
         if not self.connected:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
             
         try:
-            # We now only read the 6 bytes starting at 0x43 (Gyroscope X, Y, Z)
-            # This ignores the accelerometer completely.
-            data = self.i2c.readfrom_mem(self.addr, 0x43, 6)
+            # Read 14 bytes to grab BOTH Accel and Gyro at exactly the same time
+            data = self.i2c.readfrom_mem(self.addr, 0x3B, 14)
             
             def to_signed(msb, lsb):
                 val = (msb << 8) | lsb
                 return val if val < 32768 else val - 65536
                 
-            raw_gx = to_signed(data[0], data[1]) / 16.4
-            raw_gy = to_signed(data[2], data[3]) / 16.4
-            raw_gz = to_signed(data[4], data[5]) / 16.4
+            raw_ax = to_signed(data[0], data[1]) / 4096.0
+            raw_ay = to_signed(data[2], data[3]) / 4096.0
+            raw_az = to_signed(data[4], data[5]) / 4096.0
             
-            # Apply low-pass noise filter
+            raw_gx = to_signed(data[8], data[9]) / 16.4
+            raw_gy = to_signed(data[10], data[11]) / 16.4
+            raw_gz = to_signed(data[12], data[13]) / 16.4
+            
+            # Smooth out electronic noise on all axes
+            self.f_ax = (self.alpha * raw_ax) + ((1.0 - self.alpha) * self.f_ax)
+            self.f_ay = (self.alpha * raw_ay) + ((1.0 - self.alpha) * self.f_ay)
+            self.f_az = (self.alpha * raw_az) + ((1.0 - self.alpha) * self.f_az)
+            
             self.f_gx = (self.alpha * raw_gx) + ((1.0 - self.alpha) * self.f_gx)
             self.f_gy = (self.alpha * raw_gy) + ((1.0 - self.alpha) * self.f_gy)
             self.f_gz = (self.alpha * raw_gz) + ((1.0 - self.alpha) * self.f_gz)
 
-            return self.f_gx, self.f_gy, self.f_gz
+            return self.f_ax, self.f_ay, self.f_az, self.f_gx, self.f_gy, self.f_gz
             
         except OSError:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
 
 # ==========================================
 # SYSTEM SETUP
@@ -354,7 +391,7 @@ def main():
     ip_address = setup_wifi()
     
     if ip_address == "0.0.0.0":
-        print("Flag 0.0.0.0: Offline. Connect to a PC to debug Wi-Fi credentials.")
+        print("Flag 0.0.0.0: Offline.")
     else:
         print(f"Open this IP in your phone browser: http://{ip_address}")
 
@@ -362,22 +399,29 @@ def main():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('', 80))
     s.listen(5)
+    
+    s.settimeout(0.2) 
     print("Server is running...")
+
+    req_count = 0 
 
     while True:
         try:
             conn, addr = s.accept()
-            request = conn.recv(1024).decode('utf-8')
+            conn.settimeout(0.5) 
+            
+            request = conn.recv(512).decode('utf-8')
             
             if not request:
                 conn.close()
                 continue
                 
-            if 'GET /data' in request:
-                # Fetch only Gyroscope data now
-                gx, gy, gz = imu.get_gyro()
+            if request.startswith('GET /data'):
+                # Grab all 6 values
+                ax, ay, az, gx, gy, gz = imu.get_data()
                 
                 response_data = json.dumps({
+                    "ax": ax, "ay": ay, "az": az,
                     "gx": gx, "gy": gy, "gz": gz
                 })
                 
@@ -387,17 +431,26 @@ def main():
                 conn.send('Connection: close\n\n'.encode('utf-8'))
                 conn.send(response_data.encode('utf-8'))
                 
-            else:
+            elif request.startswith('GET / '):
                 conn.send('HTTP/1.1 200 OK\n'.encode('utf-8'))
                 conn.send('Content-Type: text/html\n'.encode('utf-8'))
                 conn.send('Connection: close\n\n'.encode('utf-8'))
                 conn.sendall(HTML_PAGE.encode('utf-8'))
                 
             conn.close()
-            gc.collect()
             
+            req_count += 1
+            if req_count > 50:
+                gc.collect()
+                req_count = 0
+            
+        except OSError:
+            pass
         except Exception as e:
-            print("Error handling request:", e)
+            try:
+                conn.close()
+            except:
+                pass
 
 if __name__ == '__main__':
     main()
