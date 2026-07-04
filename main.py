@@ -75,12 +75,19 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <script>
+        // ==========================================
+        // TWEAK THESE VARIABLES TO FINE TUNE SENSITIVITY
+        // ==========================================
+        const GYRO_DEADZONE = 3.0;        // Minimum rotation (degrees/sec) to register as movement. Increase to ignore minor hand shakes.
+        const PENALTY_MULTIPLIER = 1.0;  // How many points to deduct per degree of wobble. Increase to make the game harder.
+        const AUDIO_TENSION_SENSITIVITY = 150; // How quickly the background drone sound gets high-pitched.
+        // ==========================================
+
         let maxScore = 10000, currentScore = maxScore, timeLeft = 30, isPlaying = false;
         let gameLoopInterval, imuInterval, baseline = null, previousData = null; 
+        let lastStumpTime = 0; 
         
-        // --- Web Audio API Engine ---
-        let audioCtx;
-        let droneOsc, droneFilter, droneGain;
+        let audioCtx, droneOsc, droneFilter, droneGain;
 
         function initAudio() {
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -101,53 +108,37 @@ HTML_PAGE = """<!DOCTYPE html>
             osc.stop(audioCtx.currentTime + duration);
         }
 
-        // NOVO: Sintetizador de tensão contínuo
         function startTensionBGM() {
             if(!audioCtx) return;
-            
             droneOsc = audioCtx.createOscillator();
             droneOsc.type = 'sawtooth';
-            droneOsc.frequency.value = 110; // Tom grave base (A2)
-
+            droneOsc.frequency.value = 110; 
             droneFilter = audioCtx.createBiquadFilter();
             droneFilter.type = 'lowpass';
-            droneFilter.frequency.value = 250; // Bem abafado quando perfeitamente imóvel
-
+            droneFilter.frequency.value = 250; 
             droneGain = audioCtx.createGain();
-            droneGain.gain.value = 0.15; // Volume principal do drone
-
+            droneGain.gain.value = 0.15; 
             droneOsc.connect(droneFilter);
             droneFilter.connect(droneGain);
             droneGain.connect(audioCtx.destination);
-
             droneOsc.start();
         }
 
-        // NOVO: Atualiza o filtro do sintetizador com base no movimento do jogador
         function updateTension(movement) {
             if (!audioCtx || !droneFilter) return;
-            
-            // Mapeia o movimento (0.0 até ~1.0) para a frequência do filtro
-            // Movimento alto = som mais agudo/estridente (até 3000Hz)
-            let targetFreq = 250 + (movement * 4000);
-            if (targetFreq > 3000) targetFreq = 3000;
-            
-            // Sobe levemente o tom (pitch) também para gerar desconforto no desequilíbrio
-            let targetPitch = 110 + (movement * 50);
-            
-            // setTargetAtTime cria uma transição suave (0.1s de delay)
+            let targetFreq = 250 + (movement * AUDIO_TENSION_SENSITIVITY);
+            if (targetFreq > 2000) targetFreq = 2000;
+            let targetPitch = 110 + (movement * 2);
             droneFilter.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.1);
             droneOsc.frequency.setTargetAtTime(targetPitch, audioCtx.currentTime, 0.1);
         }
 
         function stopTensionBGM() { 
             if (droneOsc) {
-                // Fade out suave para não dar "estalo"
                 droneGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
                 droneOsc.stop(audioCtx.currentTime + 0.3);
             }
         }
-        // ----------------------------
         
         const screens = { home: document.getElementById('screen-home'), calibrating: document.getElementById('screen-calibrating'), game: document.getElementById('screen-game'), results: document.getElementById('screen-results') };
         const bubble = document.getElementById('wobble-bubble'), timerText = document.getElementById('timer-text'), liveScoreText = document.getElementById('live-score-text');
@@ -160,12 +151,12 @@ HTML_PAGE = """<!DOCTYPE html>
                 if (!res.ok) throw new Error("Network response was not ok");
                 return await res.json();
             } catch (e) { 
-                return previousData || { ax: 0, ay: 0, az: 1 }; 
+                return previousData || { gx: 0, gy: 0, gz: 0 }; 
             }
         }
 
         async function startCalibration() {
-            initAudio(); // Required to unlock browser audio
+            initAudio(); 
             switchScreen('calibrating');
             let count = 3;
             document.getElementById('countdown-text').innerText = count;
@@ -191,13 +182,14 @@ HTML_PAGE = """<!DOCTYPE html>
             isPlaying = true; 
             timeLeft = 30; 
             currentScore = maxScore;
+            lastStumpTime = 0;
             
             liveScoreText.innerText = currentScore;
             timerText.innerText = timeLeft;
             bubble.style.left = '50%';
             bubble.style.top = '50%';
 
-            startTensionBGM(); // Inicia o Drone Dinâmico
+            startTensionBGM(); 
 
             gameLoopInterval = setInterval(() => { 
                 timeLeft--; 
@@ -212,30 +204,44 @@ HTML_PAGE = """<!DOCTYPE html>
             const data = await fetchIMU();
             if (!baseline || !previousData) { baseline = data; previousData = data; }
             
-            const moveX = data.ax - previousData.ax, moveY = data.ay - previousData.ay, moveZ = data.az - previousData.az;
-            const movement = Math.sqrt(moveX*moveX + moveY*moveY + moveZ*moveZ);
+            // Subtract baseline to remove hardware bias
+            const gX = data.gx - baseline.gx;
+            const gY = data.gy - baseline.gy;
+            const gZ = data.gz - baseline.gz;
             
-            if (movement > 0.05) {
-                currentScore = Math.max(0, currentScore - Math.floor(movement * 250));
-                liveScoreText.innerText = currentScore;
-                
-                // NOVO: Adiciona um som extra de erro grave caso o movimento seja muito brusco
-                if (movement > 0.15) {
-                    playTone(150, 'sawtooth', 0.1, 0.05);
-                }
+            // Calculate total angular velocity magnitude (how fast are we rotating?)
+            let gyroMovement = Math.sqrt(gX*gX + gY*gY + gZ*gZ);
+            
+            // Deadzone Check
+            if (gyroMovement < GYRO_DEADZONE) {
+                gyroMovement = 0;
             }
             
-            // NOVO: Alimenta o sintetizador de áudio com os dados do acelerômetro
-            updateTension(movement);
+            if (gyroMovement > 0) {
+                // Deduct points based on the severity of the wobble
+                currentScore = Math.max(0, currentScore - Math.floor(gyroMovement * PENALTY_MULTIPLIER));
+                liveScoreText.innerText = currentScore;
+                
+                // Play audio stump if wobble is severe (and respect 300ms cooldown)
+                const now = Date.now();
+                if (gyroMovement > (GYRO_DEADZONE * 3) && (now - lastStumpTime > 300)) {
+                    playTone(150, 'sawtooth', 0.1, 0.05);
+                    lastStumpTime = now;
+                }
+                
+                // UI: Make bubble jitter off-center based on active rotation
+                let xPos = 50 + (gY * 0.8); 
+                let yPos = 50 + (gX * 0.8); 
+                bubble.style.left = `${Math.max(5, Math.min(95, xPos))}%`; 
+                bubble.style.top = `${Math.max(5, Math.min(95, yPos))}%`;
+            } else {
+                // UI: Return bubble smoothly to center when perfectly stable
+                bubble.style.left = `50%`; 
+                bubble.style.top = `50%`;
+            }
             
-            previousData = data;
-            
-            const absX = data.ax - baseline.ax;
-            const absY = data.ay - baseline.ay;
-            
-            let xPos = Math.max(5, Math.min(95, 50 + (absX / 0.6) * 50));
-            let yPos = Math.max(5, Math.min(95, 50 + (absY / 0.6) * 50));
-            bubble.style.left = `${xPos}%`; bubble.style.top = `${yPos}%`;
+            updateTension(gyroMovement);
+            previousData = data; 
         }
 
         function endGame() {
@@ -243,8 +249,8 @@ HTML_PAGE = """<!DOCTYPE html>
             clearInterval(gameLoopInterval); 
             clearInterval(imuInterval);
             
-            stopTensionBGM(); // Para o drone com fade-out
-            playTone(150, 'square', 0.8, 0.2); // Som de Game Over
+            stopTensionBGM(); 
+            playTone(150, 'square', 0.8, 0.2); 
             
             document.getElementById('final-score').innerText = currentScore;
             const b = document.getElementById('performance-badge');
@@ -259,53 +265,57 @@ HTML_PAGE = """<!DOCTYPE html>
 </html>"""
 
 # ==========================================
-# MPU6886 ACCELEROMETER DRIVER
+# MPU6886 GYROSCOPE ONLY DRIVER
 # ==========================================
 class MPU6886:
     def __init__(self, i2c):
         self.i2c = i2c
         self.addr = 0x68
         
-        # FIX: Increased alpha from 0.15 to 0.6. 
-        # This makes the filter settle significantly faster, eliminating the 
-        # "ghost movement tail" that kept deducting points after a shake ends.
-        self.alpha = 0.6 
+        # SENSOR NOISE FILTER
+        # A value of 1.0 means no smoothing (instant reaction but jittery).
+        # A value closer to 0.0 means heavy smoothing (sluggish but stable).
+        self.alpha = 0.3
         
-        self.filtered_ax = 0.0
-        self.filtered_ay = 0.0
-        self.filtered_az = 1.0
+        self.f_gx = 0.0
+        self.f_gy = 0.0
+        self.f_gz = 0.0
 
         try:
-            self.i2c.writeto_mem(self.addr, 0x6B, b'\x00')
+            self.i2c.writeto_mem(self.addr, 0x6B, b'\x00') # Wake up
             time.sleep_ms(10)
-            self.i2c.writeto_mem(self.addr, 0x1C, b'\x10')
+            self.i2c.writeto_mem(self.addr, 0x1B, b'\x18') # Gyro Config: 2000 dps
             self.connected = True
         except OSError:
             self.connected = False
             print("MPU6886 not found. Running in simulation mode.")
 
-    def get_accel(self):
+    def get_gyro(self):
         if not self.connected:
-            return 0.0, 0.0, 1.0 
+            return 0.0, 0.0, 0.0
             
         try:
-            data = self.i2c.readfrom_mem(self.addr, 0x3B, 6)
+            # We now only read the 6 bytes starting at 0x43 (Gyroscope X, Y, Z)
+            # This ignores the accelerometer completely.
+            data = self.i2c.readfrom_mem(self.addr, 0x43, 6)
+            
             def to_signed(msb, lsb):
                 val = (msb << 8) | lsb
                 return val if val < 32768 else val - 65536
                 
-            raw_ax = to_signed(data[0], data[1]) / 4096.0
-            raw_ay = to_signed(data[2], data[3]) / 4096.0
-            raw_az = to_signed(data[4], data[5]) / 4096.0
+            raw_gx = to_signed(data[0], data[1]) / 16.4
+            raw_gy = to_signed(data[2], data[3]) / 16.4
+            raw_gz = to_signed(data[4], data[5]) / 16.4
+            
+            # Apply low-pass noise filter
+            self.f_gx = (self.alpha * raw_gx) + ((1.0 - self.alpha) * self.f_gx)
+            self.f_gy = (self.alpha * raw_gy) + ((1.0 - self.alpha) * self.f_gy)
+            self.f_gz = (self.alpha * raw_gz) + ((1.0 - self.alpha) * self.f_gz)
 
-            self.filtered_ax = (self.alpha * raw_ax) + ((1.0 - self.alpha) * self.filtered_ax)
-            self.filtered_ay = (self.alpha * raw_ay) + ((1.0 - self.alpha) * self.filtered_ay)
-            self.filtered_az = (self.alpha * raw_az) + ((1.0 - self.alpha) * self.filtered_az)
-
-            return self.filtered_ax, self.filtered_ay, self.filtered_az
+            return self.f_gx, self.f_gy, self.f_gz
             
         except OSError:
-            return 0.0, 0.0, 1.0
+            return 0.0, 0.0, 0.0
 
 # ==========================================
 # SYSTEM SETUP
@@ -364,8 +374,12 @@ def main():
                 continue
                 
             if 'GET /data' in request:
-                ax, ay, az = imu.get_accel()
-                response_data = json.dumps({"ax": ax, "ay": ay, "az": az})
+                # Fetch only Gyroscope data now
+                gx, gy, gz = imu.get_gyro()
+                
+                response_data = json.dumps({
+                    "gx": gx, "gy": gy, "gz": gz
+                })
                 
                 conn.send('HTTP/1.1 200 OK\n'.encode('utf-8'))
                 conn.send('Content-Type: application/json\n'.encode('utf-8'))
