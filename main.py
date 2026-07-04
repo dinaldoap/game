@@ -80,7 +80,7 @@ HTML_PAGE = """<!DOCTYPE html>
         
         // --- Web Audio API Engine ---
         let audioCtx;
-        let bgmInterval;
+        let droneOsc, droneFilter, droneGain;
 
         function initAudio() {
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -101,16 +101,52 @@ HTML_PAGE = """<!DOCTYPE html>
             osc.stop(audioCtx.currentTime + duration);
         }
 
-        function playBGM() {
-            let step = 0;
-            // A simple relaxing repeating pattern during the game
-            const notes = [261.6, 329.6, 392.0, 329.6]; 
-            bgmInterval = setInterval(() => {
-                playTone(notes[step % 4], 'sine', 0.4, 0.03);
-                step++;
-            }, 500);
+        // NOVO: Sintetizador de tensão contínuo
+        function startTensionBGM() {
+            if(!audioCtx) return;
+            
+            droneOsc = audioCtx.createOscillator();
+            droneOsc.type = 'sawtooth';
+            droneOsc.frequency.value = 110; // Tom grave base (A2)
+
+            droneFilter = audioCtx.createBiquadFilter();
+            droneFilter.type = 'lowpass';
+            droneFilter.frequency.value = 250; // Bem abafado quando perfeitamente imóvel
+
+            droneGain = audioCtx.createGain();
+            droneGain.gain.value = 0.15; // Volume principal do drone
+
+            droneOsc.connect(droneFilter);
+            droneFilter.connect(droneGain);
+            droneGain.connect(audioCtx.destination);
+
+            droneOsc.start();
         }
-        function stopBGM() { clearInterval(bgmInterval); }
+
+        // NOVO: Atualiza o filtro do sintetizador com base no movimento do jogador
+        function updateTension(movement) {
+            if (!audioCtx || !droneFilter) return;
+            
+            // Mapeia o movimento (0.0 até ~1.0) para a frequência do filtro
+            // Movimento alto = som mais agudo/estridente (até 3000Hz)
+            let targetFreq = 250 + (movement * 4000);
+            if (targetFreq > 3000) targetFreq = 3000;
+            
+            // Sobe levemente o tom (pitch) também para gerar desconforto no desequilíbrio
+            let targetPitch = 110 + (movement * 50);
+            
+            // setTargetAtTime cria uma transição suave (0.1s de delay)
+            droneFilter.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.1);
+            droneOsc.frequency.setTargetAtTime(targetPitch, audioCtx.currentTime, 0.1);
+        }
+
+        function stopTensionBGM() { 
+            if (droneOsc) {
+                // Fade out suave para não dar "estalo"
+                droneGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+                droneOsc.stop(audioCtx.currentTime + 0.3);
+            }
+        }
         // ----------------------------
         
         const screens = { home: document.getElementById('screen-home'), calibrating: document.getElementById('screen-calibrating'), game: document.getElementById('screen-game'), results: document.getElementById('screen-results') };
@@ -133,18 +169,18 @@ HTML_PAGE = """<!DOCTYPE html>
             switchScreen('calibrating');
             let count = 3;
             document.getElementById('countdown-text').innerText = count;
-            playTone(440, 'square', 0.2, 0.1); // Sound for "3"
+            playTone(440, 'square', 0.2, 0.1);
             
             const iv = setInterval(async () => {
                 count--;
                 if (count > 0) {
                     document.getElementById('countdown-text').innerText = count;
-                    playTone(440, 'square', 0.2, 0.1); // Sound for "2" and "1"
+                    playTone(440, 'square', 0.2, 0.1);
                 } else { 
                     clearInterval(iv); 
                     baseline = await fetchIMU(); 
                     previousData = baseline; 
-                    playTone(880, 'square', 0.5, 0.15); // Higher tone for "START"
+                    playTone(880, 'square', 0.5, 0.15); 
                     startGame(); 
                 }
             }, 1000);
@@ -156,13 +192,12 @@ HTML_PAGE = """<!DOCTYPE html>
             timeLeft = 30; 
             currentScore = maxScore;
             
-            // FIX: Reset the UI text properly on the second try
             liveScoreText.innerText = currentScore;
             timerText.innerText = timeLeft;
             bubble.style.left = '50%';
             bubble.style.top = '50%';
 
-            playBGM(); // Start the background music
+            startTensionBGM(); // Inicia o Drone Dinâmico
 
             gameLoopInterval = setInterval(() => { 
                 timeLeft--; 
@@ -183,7 +218,15 @@ HTML_PAGE = """<!DOCTYPE html>
             if (movement > 0.05) {
                 currentScore = Math.max(0, currentScore - Math.floor(movement * 250));
                 liveScoreText.innerText = currentScore;
+                
+                // NOVO: Adiciona um som extra de erro grave caso o movimento seja muito brusco
+                if (movement > 0.15) {
+                    playTone(150, 'sawtooth', 0.1, 0.05);
+                }
             }
+            
+            // NOVO: Alimenta o sintetizador de áudio com os dados do acelerômetro
+            updateTension(movement);
             
             previousData = data;
             
@@ -200,8 +243,8 @@ HTML_PAGE = """<!DOCTYPE html>
             clearInterval(gameLoopInterval); 
             clearInterval(imuInterval);
             
-            stopBGM(); // Stop music
-            playTone(150, 'sawtooth', 0.8, 0.2); // Low buzzer sound for Game Over
+            stopTensionBGM(); // Para o drone com fade-out
+            playTone(150, 'square', 0.8, 0.2); // Som de Game Over
             
             document.getElementById('final-score').innerText = currentScore;
             const b = document.getElementById('performance-badge');
