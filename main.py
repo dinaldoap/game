@@ -4,16 +4,10 @@ import socket
 import time
 import json
 import gc
+import math
 
 # ==========================================
-# CONFIGURATION - MULTIPLE NETWORKS
-# ==========================================
-NETWORKS = [
-    ('LOCALLINK-36194', 'V7870601x'),
-]
-
-# ==========================================
-# HTML INTERFACE (Embedded)
+# HTML INTERFACE (Embedded - 100% Offline)
 # ==========================================
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -21,71 +15,102 @@ HTML_PAGE = """<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Equilibrium Challenge</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { background-color: #0f172a; color: #f8fafc; font-family: system-ui, sans-serif; touch-action: manipulation; }
-        .bubble-transition { transition: top 0.1s ease-out, left 0.1s ease-out; }
-        .pulse-animation { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .7; transform: scale(0.95); } }
+        :root {
+            --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8;
+            --primary: #2563eb; --primary-hover: #1d4ed8;
+            --border: #334155; --accent: #60a5fa;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; user-select: none; }
+        body { background-color: var(--bg); color: var(--text); touch-action: manipulation; display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; align-items: center; justify-content: center; padding: 20px; }
+        
+        .container { max-width: 400px; width: 100%; text-align: center; display: flex; flex-direction: column; gap: 20px; }
+        .card { background-color: var(--card); padding: 24px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid var(--border); }
+        h1 { color: var(--accent); font-size: 2.2rem; margin-bottom: 5px; }
+        h2 { color: var(--accent); font-size: 1.8rem; }
+        p, li { color: var(--muted); text-align: left; }
+        ol { padding-left: 20px; margin-top: 10px; }
+        li { margin-bottom: 10px; line-height: 1.4; }
+        strong { color: var(--text); }
+        
+        button { width: 100%; background-color: var(--primary); color: white; border: none; padding: 18px 30px; border-radius: 50px; font-size: 1.2rem; font-weight: bold; cursor: pointer; transition: transform 0.1s, background-color 0.2s; margin-top: 10px; box-shadow: 0 4px 15px rgba(37, 99, 235, 0.4); }
+        button:active { background-color: var(--primary-hover); transform: scale(0.96); }
+        button.secondary { background-color: var(--border); box-shadow: none; }
+        button.secondary:active { background-color: #475569; }
+
+        /* Core visibility class */
+        .hidden { display: none !important; }
+        
+        /* Screens */
+        .screen { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; }
+        
+        /* Game specific */
+        .score-board { display: flex; justify-content: space-between; width: 100%; padding: 0 10px; font-weight: bold; font-size: 1.2rem; margin-bottom: 20px; }
+        .score-board span { color: white; font-size: 1.8rem; display: block; margin-top: 5px;}
+        
+        .arena { position: relative; width: 260px; height: 260px; border-radius: 50%; border: 4px solid var(--border); background-color: var(--bg); overflow: hidden; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 0 30px rgba(0,0,0,0.8); }
+        .crosshair-h { position: absolute; width: 100%; height: 1px; background-color: rgba(255,255,255,0.15); }
+        .crosshair-v { position: absolute; height: 100%; width: 1px; background-color: rgba(255,255,255,0.15); }
+        .target-ring { position: absolute; width: 130px; height: 130px; border-radius: 50%; border: 1px dashed rgba(255,255,255,0.2); }
+        .bubble { position: absolute; width: 32px; height: 32px; border-radius: 50%; background-color: var(--primary); box-shadow: 0 0 20px var(--accent); transition: top 0.08s ease-out, left 0.08s ease-out; z-index: 10; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+        
+        .countdown { font-size: 8rem; font-weight: 900; color: white; margin-top: 20px; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(0.9); opacity: 0.8; } }
+        
+        .final-score { font-size: 4.5rem; font-weight: 900; color: var(--accent); margin: 15px 0; }
+        .badge { padding: 6px 20px; border-radius: 20px; font-size: 1rem; font-weight: bold; text-transform: uppercase; border: 2px solid var(--primary); color: var(--accent); background-color: rgba(37, 99, 235, 0.15); }
     </style>
 </head>
-<body class="flex flex-col h-screen w-screen overflow-hidden items-center justify-center p-4">
-    <div id="screen-home" class="flex flex-col items-center max-w-md w-full text-center space-y-6 transition-opacity duration-300">
-        <div class="p-4 bg-slate-800 rounded-2xl shadow-xl w-full border border-slate-700">
-            <h1 class="text-3xl font-bold text-blue-400 mb-2">Equilibrium</h1>
+<body>
+    <div id="screen-home" class="screen container">
+        <div class="card">
+            <h1>Equilibrium</h1>
+            <p style="text-align: center; color: var(--accent);">Balance Challenge</p>
         </div>
-        <div class="text-left bg-slate-800 p-6 rounded-2xl shadow-lg border border-slate-700 space-y-4 w-full">
-            <h3 class="font-bold text-xl border-b border-slate-700 pb-2">Instructions:</h3>
-            <ol class="list-decimal list-inside space-y-2 text-slate-300">
+        <div class="card">
+            <h3 style="color: white; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 15px; text-align:left;">Instructions:</h3>
+            <ol>
                 <li>Hold M5Stick firmly against chest.</li>
                 <li>Stand on <strong>one foot</strong>.</li>
                 <li>Cross your arms over your chest.</li>
                 <li>Press Start, then <strong>close your eyes</strong>.</li>
             </ol>
         </div>
-        <button onclick="startCalibration()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-8 rounded-full shadow-lg text-xl">START</button>
+        <button onclick="startCalibration()">START</button>
     </div>
 
-    <div id="screen-calibrating" class="hidden flex-col items-center justify-center w-full h-full space-y-8">
-        <h2 class="text-2xl font-bold text-blue-400">Get Ready!</h2>
-        <div id="countdown-text" class="text-8xl font-black text-white pulse-animation">3</div>
+    <div id="screen-calibrating" class="screen hidden">
+        <h2>Get Ready!</h2>
+        <div id="countdown-text" class="countdown">3</div>
     </div>
 
-    <div id="screen-game" class="hidden flex-col items-center w-full max-w-md space-y-8">
-        <div class="flex justify-between w-full px-4 items-center">
-            <div class="text-slate-400 font-semibold">Time: <span id="timer-text" class="text-white text-2xl">30</span>s</div>
-            <div class="text-slate-400 font-semibold text-right">Score: <span id="live-score-text" class="text-white text-2xl">10000</span></div>
+    <div id="screen-game" class="screen hidden container">
+        <div class="score-board">
+            <div style="color: var(--muted); text-align: left;">Time <span id="timer-text">30</span></div>
+            <div style="color: var(--muted); text-align: right;">Score <span id="live-score-text">10000</span></div>
         </div>
-        <div class="relative w-64 h-64 rounded-full border-4 border-slate-600 bg-slate-800 shadow-inner flex items-center justify-center overflow-hidden">
-            <div class="absolute w-full h-px bg-slate-600/50"></div>
-            <div class="absolute h-full w-px bg-slate-600/50"></div>
-            <div class="absolute w-32 h-32 rounded-full border border-slate-600/50"></div>
-            <div id="wobble-bubble" class="absolute w-8 h-8 rounded-full bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.8)] bubble-transition z-10" style="top: 50%; left: 50%; transform: translate(-50%, -50%);"></div>
+        <div class="arena">
+            <div class="crosshair-h"></div>
+            <div class="crosshair-v"></div>
+            <div class="target-ring"></div>
+            <div id="wobble-bubble" class="bubble"></div>
         </div>
     </div>
 
-    <div id="screen-results" class="hidden flex-col items-center max-w-md w-full space-y-6">
-        <h2 class="text-3xl font-bold text-slate-100">Round Over!</h2>
-        <div class="bg-slate-800 p-8 rounded-3xl shadow-2xl border border-slate-700 w-full flex flex-col items-center">
-            <p class="text-slate-400 font-medium mb-2">Final Score</p>
-            <div id="final-score" class="text-6xl font-black text-blue-400 mb-4">8500</div>
-            <div id="performance-badge" class="px-4 py-1 rounded-full text-sm font-bold uppercase bg-blue-900/50 text-blue-300 border border-blue-700">Great</div>
+    <div id="screen-results" class="screen hidden container">
+        <h2>Round Over!</h2>
+        <div class="card" style="display: flex; flex-direction: column; align-items: center;">
+            <p style="text-align: center;">Final Score</p>
+            <div id="final-score" class="final-score">8500</div>
+            <div id="performance-badge" class="badge">Great</div>
         </div>
-        <button onclick="resetGame()" class="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-4 px-8 rounded-full shadow-lg text-lg">TRY AGAIN</button>
+        <button class="secondary" onclick="resetGame()">TRY AGAIN</button>
     </div>
 
     <script>
-        // --- FUSION TUNING PARAMETERS ---
-        const GYRO_DEADZONE = 3.0;         // Ignores micro-wobbles (degrees/sec)
-        const ACCEL_DEADZONE = 0.08;       // Ignores micro-leaning (G-force shift)
-        const ACCEL_WEIGHT = 100.0;        // Multiplier to make Accel data scale similarly to Gyro data
-        const PENALTY_MULTIPLIER = 1.0;    // Final score drain speed
-
         let maxScore = 10000, currentScore = maxScore, timeLeft = 30, isPlaying = false;
-        let gameLoopInterval, imuTimeout, baseline = null; 
+        let gameLoopInterval, imuTimeout; 
         let lastStumpTime = 0; 
-        let stableFrames = 0; 
-        
         let audioCtx;
 
         function initAudio() {
@@ -110,12 +135,15 @@ HTML_PAGE = """<!DOCTYPE html>
         const screens = { home: document.getElementById('screen-home'), calibrating: document.getElementById('screen-calibrating'), game: document.getElementById('screen-game'), results: document.getElementById('screen-results') };
         const bubble = document.getElementById('wobble-bubble'), timerText = document.getElementById('timer-text'), liveScoreText = document.getElementById('live-score-text');
 
-        function switchScreen(s) { Object.values(screens).forEach(scr => scr.classList.add('hidden')); screens[s].classList.remove('hidden'); screens[s].classList.add('flex'); }
+        function switchScreen(s) { 
+            Object.values(screens).forEach(scr => scr.classList.add('hidden')); 
+            screens[s].classList.remove('hidden'); 
+        }
 
         async function fetchIMU() {
             try {
                 const res = await fetch('/data', { signal: AbortSignal.timeout(200) });
-                if (!res.ok) throw new Error("Network response was not ok");
+                if (!res.ok) throw new Error("Network error");
                 return await res.json();
             } catch (e) { 
                 return null; 
@@ -136,12 +164,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     playTone(440, 'square', 0.2, 0.1);
                 } else { 
                     clearInterval(iv); 
-                    
-                    baseline = null;
-                    while(!baseline) {
-                        baseline = await fetchIMU();
-                    }
-                    
+                    try { await fetch('/calibrate'); } catch(e) { console.error("Calib failed"); }
                     playTone(880, 'square', 0.5, 0.15); 
                     startGame(); 
                 }
@@ -154,7 +177,6 @@ HTML_PAGE = """<!DOCTYPE html>
             timeLeft = 30; 
             currentScore = maxScore;
             lastStumpTime = 0;
-            stableFrames = 0;
             
             liveScoreText.innerText = currentScore;
             timerText.innerText = timeLeft;
@@ -178,65 +200,21 @@ HTML_PAGE = """<!DOCTYPE html>
 
         async function processIMU() {
             const data = await fetchIMU();
+            if (!data) return; 
             
-            if (!data) {
-                // Network drop fail-safe
-                bubble.style.left = `50%`; 
-                bubble.style.top = `50%`;
-                return; 
-            }
-            
-            if (!baseline) { baseline = data; }
-            
-            // 1. Calculate Gyro Wobble (Fast Shakes)
-            const gX = data.gx - baseline.gx;
-            const gY = data.gy - baseline.gy;
-            const gZ = data.gz - baseline.gz;
-            let gyroWobble = Math.sqrt(gX*gX + gY*gY + gZ*gZ);
-            
-            // 2. Calculate Accel Shift (Slow Leaning/Posture change)
-            const aX = data.ax - baseline.ax;
-            const aY = data.ay - baseline.ay;
-            const aZ = data.az - baseline.az;
-            let accelShift = Math.sqrt(aX*aX + aY*aY + aZ*aZ);
-
-            // 3. Auto-Zero Logic (Must be stable on BOTH sensors)
-            if (gyroWobble < 1.5 && accelShift < 0.05) {
-                stableFrames++;
-                if (stableFrames > 15) {
-                    baseline = data; // Reset completely to current posture
-                    stableFrames = 0; 
-                }
-            } else {
-                stableFrames = 0; 
-            }
-
-            // 4. Apply Deadzones
-            if (gyroWobble < GYRO_DEADZONE) gyroWobble = 0;
-            if (accelShift < ACCEL_DEADZONE) accelShift = 0;
-            
-            // 5. SENSOR FUSION: Combine the punished values
-            let combinedMovement = gyroWobble + (accelShift * ACCEL_WEIGHT);
-            
-            if (combinedMovement > 0) {
-                currentScore = Math.max(0, currentScore - Math.floor(combinedMovement * PENALTY_MULTIPLIER));
+            if (data.p > 0) {
+                currentScore = Math.max(0, currentScore - Math.floor(data.p));
                 liveScoreText.innerText = currentScore;
                 
                 const now = Date.now();
-                if (combinedMovement > (GYRO_DEADZONE * 3) && (now - lastStumpTime > 300)) {
-                    playTone(150, 'sawtooth', 0.1, 0.05); // Play brief error sound
+                if (data.p > 15 && (now - lastStumpTime > 300)) {
+                    playTone(150, 'sawtooth', 0.1, 0.05); 
                     lastStumpTime = now;
                 }
-                
-                // UI: Bubble reacts to Gyro for jitter, and Accel for drifting off center
-                let xPos = 50 + (gY * 0.5) + (aX * 40); 
-                let yPos = 50 + (gX * 0.5) + (aY * 40); 
-                bubble.style.left = `${Math.max(5, Math.min(95, xPos))}%`; 
-                bubble.style.top = `${Math.max(5, Math.min(95, yPos))}%`;
-            } else {
-                bubble.style.left = `50%`; 
-                bubble.style.top = `50%`;
             }
+            
+            bubble.style.left = `${Math.max(5, Math.min(95, data.bx))}%`; 
+            bubble.style.top = `${Math.max(5, Math.min(95, data.by))}%`;
         }
 
         function endGame() {
@@ -244,13 +222,21 @@ HTML_PAGE = """<!DOCTYPE html>
             clearInterval(gameLoopInterval); 
             clearTimeout(imuTimeout); 
             
-            playTone(150, 'square', 0.8, 0.2); // Game over sound
+            playTone(150, 'square', 0.8, 0.2); 
             
             document.getElementById('final-score').innerText = currentScore;
             const b = document.getElementById('performance-badge');
-            if (currentScore > 9000) { b.innerText = "Master"; b.className = "px-4 py-1 rounded-full text-sm font-bold bg-purple-900/50 text-purple-300 border border-purple-500"; }
-            else if (currentScore > 5000) { b.innerText = "Good"; b.className = "px-4 py-1 rounded-full text-sm font-bold bg-blue-900/50 text-blue-300 border border-blue-500"; }
-            else { b.innerText = "Needs Practice"; b.className = "px-4 py-1 rounded-full text-sm font-bold bg-red-900/50 text-red-300 border border-red-500"; }
+            
+            if (currentScore > 9000) { 
+                b.innerText = "Master"; 
+                b.style.borderColor = "#a855f7"; b.style.color = "#d8b4fe"; b.style.backgroundColor = "rgba(168, 85, 247, 0.15)";
+            } else if (currentScore > 5000) { 
+                b.innerText = "Good"; 
+                b.style.borderColor = "#3b82f6"; b.style.color = "#93c5fd"; b.style.backgroundColor = "rgba(59, 130, 246, 0.15)";
+            } else { 
+                b.innerText = "Needs Practice"; 
+                b.style.borderColor = "#ef4444"; b.style.color = "#fca5a5"; b.style.backgroundColor = "rgba(239, 68, 68, 0.15)";
+            }
             switchScreen('results');
         }
         function resetGame() { switchScreen('home'); }
@@ -313,28 +299,110 @@ class MPU6886:
             return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
 
 # ==========================================
-# SYSTEM SETUP
+# EDGE COMPUTING - GAME ENGINE
 # ==========================================
-def setup_wifi():
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    
-    for ssid, password in NETWORKS:
-        print(f"Trying to connect to: {ssid}")
-        wlan.connect(ssid, password)
+class GameEngine:
+    def __init__(self, imu):
+        self.imu = imu
+        self.baseline = None
+        self.stable_frames = 0
         
-        timeout = 10
-        while not wlan.isconnected() and timeout > 0:
-            timeout -= 1
-            time.sleep(1)
+        # FUSION TUNING PARAMETERS (Moved from JS)
+        self.GYRO_DEADZONE = 3.0
+        self.ACCEL_DEADZONE = 0.08
+        self.ACCEL_WEIGHT = 100.0
+        self.PENALTY_MULTIPLIER = 0.5
+        
+        # State
+        self.accumulated_penalty = 0.0
+        self.bx = 50.0
+        self.by = 50.0
+
+    def calibrate(self):
+        self.baseline = self.imu.get_data()
+        self.stable_frames = 0
+        self.accumulated_penalty = 0.0
+        self.bx = 50.0
+        self.by = 50.0
+
+    def update(self):
+        data = self.imu.get_data()
+        if not self.baseline:
+            self.baseline = data
             
-        if wlan.isconnected():
-            ip = wlan.ifconfig()[0]
-            print(f"Connected successfully! Network config: {wlan.ifconfig()}")
-            return ip
+        # 1. Calculate Gyro Wobble
+        gx = data[3] - self.baseline[3]
+        gy = data[4] - self.baseline[4]
+        gz = data[5] - self.baseline[5]
+        gyro_wobble = math.sqrt(gx*gx + gy*gy + gz*gz)
+        
+        # 2. Calculate Accel Shift
+        ax = data[0] - self.baseline[0]
+        ay = data[1] - self.baseline[1]
+        az = data[2] - self.baseline[2]
+        accel_shift = math.sqrt(ax*ax + ay*ay + az*az)
+        
+        # 3. Auto-Zero Logic (Protects against sensor drift over time)
+        if gyro_wobble < 1.5 and accel_shift < 0.05:
+            self.stable_frames += 1
+            if self.stable_frames > 15:
+                self.baseline = data # Set new baseline silently
+                self.stable_frames = 0
+        else:
+            self.stable_frames = 0
             
-    print("Failed to connect to any network.")
-    return "0.0.0.0"
+        # 4. Apply Deadzones
+        if gyro_wobble < self.GYRO_DEADZONE: gyro_wobble = 0
+        if accel_shift < self.ACCEL_DEADZONE: accel_shift = 0
+        
+        # 5. Sensor Fusion Logic
+        combined = gyro_wobble + (accel_shift * self.ACCEL_WEIGHT)
+        
+        if combined > 0:
+            # We ACCUMULATE the penalty. If the network drops a packet,
+            # the next successful packet will send the total missed deduction.
+            self.accumulated_penalty += (combined * self.PENALTY_MULTIPLIER)
+            
+            # Update visual bubble coordinates (constrained limits handled by JS)
+            self.bx = 50 + (gy * 0.5) + (ax * 40)
+            self.by = 50 + (gx * 0.5) + (ay * 40)
+        else:
+            self.bx = 50.0
+            self.by = 50.0
+
+    def get_payload(self):
+        # Extract penalty and clear the accumulator for the next cycle
+        p = self.accumulated_penalty
+        self.accumulated_penalty = 0.0
+        return {"p": p, "bx": self.bx, "by": self.by}
+
+# ==========================================
+# SYSTEM SETUP: ACCESS POINT (AP MODE)
+# ==========================================
+def setup_ap():
+    # Configure device as Access Point
+    ap = network.WLAN(network.AP_IF)
+    ap.active(True)
+    
+    # Set SSID and Password (authmode 3 = WPA2-PSK)
+    ssid = "Equilibrium_M5"
+    password = "12345678"
+    ap.config(essid=ssid, password=password, authmode=3)
+    
+    # Wait for AP to become active
+    while not ap.active():
+        time.sleep(0.5)
+        
+    ip = ap.ifconfig()[0]
+    
+    print("\n" + "="*40)
+    print("🚀 M5Stick Access Point Ready!")
+    print(f"📡 Connect your phone to Wi-Fi: {ssid}")
+    print(f"🔑 Password: {password}")
+    print(f"🌐 Then open browser at: http://{ip}")
+    print("="*40 + "\n")
+    
+    return ip
 
 def main():
     power_hold = machine.Pin(4, machine.Pin.OUT)
@@ -345,25 +413,33 @@ def main():
 
     i2c = machine.I2C(0, scl=machine.Pin(22), sda=machine.Pin(21), freq=100000)
     imu = MPU6886(i2c)
-
-    ip_address = setup_wifi()
     
-    if ip_address == "0.0.0.0":
-        print("Flag 0.0.0.0: Offline.")
-    else:
-        print(f"Open this IP in your phone browser: http://{ip_address}")
+    # Initialize Game Engine
+    engine = GameEngine(imu)
+
+    # Boot in AP Mode
+    ip_address = setup_ap()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('', 80))
     s.listen(5)
     
-    s.settimeout(0.2) 
+    # NON-BLOCKING SOCKET: Allows the Game Engine to run consistently
+    s.setblocking(False) 
     print("Server is running...")
 
     req_count = 0 
+    last_engine_update = time.ticks_ms()
 
     while True:
+        # --- 1. EDGE PROCESSING CYCLE (Runs at ~50Hz) ---
+        now = time.ticks_ms()
+        if time.ticks_diff(now, last_engine_update) >= 20: 
+            engine.update()
+            last_engine_update = now
+
+        # --- 2. NETWORK HANDLING CYCLE ---
         try:
             conn, addr = s.accept()
             conn.settimeout(0.5) 
@@ -375,23 +451,21 @@ def main():
                 continue
                 
             if request.startswith('GET /data'):
-                ax, ay, az, gx, gy, gz = imu.get_data()
+                # Send the accumulated payload
+                response_data = json.dumps(engine.get_payload())
                 
-                response_data = json.dumps({
-                    "ax": ax, "ay": ay, "az": az,
-                    "gx": gx, "gy": gy, "gz": gz
-                })
-                
-                conn.send('HTTP/1.1 200 OK\n'.encode('utf-8'))
-                conn.send('Content-Type: application/json\n'.encode('utf-8'))
-                conn.send('Access-Control-Allow-Origin: *\n'.encode('utf-8'))
-                conn.send('Connection: close\n\n'.encode('utf-8'))
+                conn.send('HTTP/1.1 200 OK\r\n'.encode('utf-8'))
+                conn.send('Content-Type: application/json\r\n'.encode('utf-8'))
+                conn.send('Access-Control-Allow-Origin: *\r\n'.encode('utf-8'))
+                conn.send('Connection: close\r\n\r\n'.encode('utf-8'))
                 conn.send(response_data.encode('utf-8'))
                 
+            elif request.startswith('GET /calibrate'):
+                engine.calibrate()
+                conn.send('HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK'.encode('utf-8'))
+                
             elif request.startswith('GET / '):
-                conn.send('HTTP/1.1 200 OK\n'.encode('utf-8'))
-                conn.send('Content-Type: text/html\n'.encode('utf-8'))
-                conn.send('Connection: close\n\n'.encode('utf-8'))
+                conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                 conn.sendall(HTML_PAGE.encode('utf-8'))
                 
             conn.close()
@@ -402,6 +476,7 @@ def main():
                 req_count = 0
             
         except OSError:
+            # Expected behavior for non-blocking socket when no request is waiting
             pass
         except Exception as e:
             try:
