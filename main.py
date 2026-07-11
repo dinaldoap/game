@@ -38,13 +38,9 @@ HTML_PAGE = """<!DOCTYPE html>
         button.secondary { background-color: var(--border); box-shadow: none; }
         button.secondary:active { background-color: #475569; }
 
-        /* Core visibility class */
         .hidden { display: none !important; }
-        
-        /* Screens */
         .screen { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; }
         
-        /* Game specific */
         .score-board { display: flex; justify-content: space-between; width: 100%; padding: 0 10px; font-weight: bold; font-size: 1.2rem; margin-bottom: 20px; }
         .score-board span { color: white; font-size: 1.8rem; display: block; margin-top: 5px;}
         
@@ -59,9 +55,14 @@ HTML_PAGE = """<!DOCTYPE html>
         
         .final-score { font-size: 4.5rem; font-weight: 900; color: var(--accent); margin: 15px 0; }
         .badge { padding: 6px 20px; border-radius: 20px; font-size: 1rem; font-weight: bold; text-transform: uppercase; border: 2px solid var(--primary); color: var(--accent); background-color: rgba(37, 99, 235, 0.15); }
+
+        /* BATTERY INDICATOR STYLING */
+        .bat-status { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.5); padding: 5px 12px; border-radius: 20px; font-size: 0.9rem; font-weight: bold; color: var(--accent); border: 1px solid var(--border); z-index: 100; box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
     </style>
 </head>
 <body>
+    <div id="bat-status" class="bat-status">🔋 --%</div>
+
     <div id="screen-home" class="screen container">
         <div class="card">
             <h1>Equilibrium</h1>
@@ -134,6 +135,7 @@ HTML_PAGE = """<!DOCTYPE html>
         
         const screens = { home: document.getElementById('screen-home'), calibrating: document.getElementById('screen-calibrating'), game: document.getElementById('screen-game'), results: document.getElementById('screen-results') };
         const bubble = document.getElementById('wobble-bubble'), timerText = document.getElementById('timer-text'), liveScoreText = document.getElementById('live-score-text');
+        const batStatus = document.getElementById('bat-status');
 
         function switchScreen(s) { 
             Object.values(screens).forEach(scr => scr.classList.add('hidden')); 
@@ -193,15 +195,37 @@ HTML_PAGE = """<!DOCTYPE html>
         }
 
         async function pollIMU() {
-            if (!isPlaying) return;
+            if (!isPlaying) {
+                // Keep polling slowly in background just for battery when not playing
+                setTimeout(backgroundPoll, 2000);
+                return;
+            }
             await processIMU();
             imuTimeout = setTimeout(pollIMU, 80); 
+        }
+
+        async function backgroundPoll() {
+            if (isPlaying) return;
+            const data = await fetchIMU();
+            if (data && data.bat !== undefined) {
+                batStatus.innerText = `🔋 ${data.bat}%`;
+                if (data.bat <= 20) batStatus.style.color = "#ef4444";
+                else batStatus.style.color = "var(--accent)";
+            }
+            setTimeout(backgroundPoll, 2000);
         }
 
         async function processIMU() {
             const data = await fetchIMU();
             if (!data) return; 
             
+            // UPDATE BATTERY UI
+            if (data.bat !== undefined) {
+                batStatus.innerText = `🔋 ${data.bat}%`;
+                if (data.bat <= 20) batStatus.style.color = "#ef4444";
+                else batStatus.style.color = "var(--accent)";
+            }
+
             if (data.p > 0) {
                 currentScore = Math.max(0, currentScore - Math.floor(data.p));
                 liveScoreText.innerText = currentScore;
@@ -238,11 +262,35 @@ HTML_PAGE = """<!DOCTYPE html>
                 b.style.borderColor = "#ef4444"; b.style.color = "#fca5a5"; b.style.backgroundColor = "rgba(239, 68, 68, 0.15)";
             }
             switchScreen('results');
+            backgroundPoll(); // Resume background battery polling
         }
         function resetGame() { switchScreen('home'); }
+        
+        // Start background polling on load
+        backgroundPoll();
     </script>
 </body>
 </html>"""
+
+# ==========================================
+# BATTERY MONITOR (M5StickC Plus 2)
+# ==========================================
+class StickPlus2Battery:
+    def __init__(self):
+        # The Plus 2 reads battery voltage via an internal divider on Pin 38
+        self.adc = machine.ADC(machine.Pin(38))
+        self.adc.atten(machine.ADC.ATTN_11DB) # Configure for wider voltage range
+        self.adc.width(machine.ADC.WIDTH_12BIT)
+
+    def get_battery_level(self):
+        try:
+            raw = self.adc.read()
+            # On the Plus 2, the 12-bit ADC reads ~2600 at 4.2V (100% full) 
+            # and roughly ~1900 at 3.2V (0% empty)
+            pct = ((raw - 1900) / 700.0) * 100
+            return max(0, min(100, int(pct)))
+        except Exception:
+            return 100 # Fallback so the game doesn't crash if reading fails
 
 # ==========================================
 # MPU6886 FULL 6-AXIS DRIVER
@@ -251,20 +299,19 @@ class MPU6886:
     def __init__(self, i2c):
         self.i2c = i2c
         self.addr = 0x68
-        self.alpha = 0.3 # Global Low-Pass Filter
+        self.alpha = 0.3 
         
         self.f_ax, self.f_ay, self.f_az = 0.0, 0.0, 1.0
         self.f_gx, self.f_gy, self.f_gz = 0.0, 0.0, 0.0
 
         try:
-            self.i2c.writeto_mem(self.addr, 0x6B, b'\x00') # Wake
+            self.i2c.writeto_mem(self.addr, 0x6B, b'\x00') 
             time.sleep_ms(10)
-            self.i2c.writeto_mem(self.addr, 0x1C, b'\x10') # Accel 8G
-            self.i2c.writeto_mem(self.addr, 0x1B, b'\x18') # Gyro 2000 dps
+            self.i2c.writeto_mem(self.addr, 0x1C, b'\x10') 
+            self.i2c.writeto_mem(self.addr, 0x1B, b'\x18') 
             self.connected = True
         except OSError:
             self.connected = False
-            print("MPU6886 not found. Running in simulation mode.")
 
     def get_data(self):
         if not self.connected:
@@ -272,7 +319,6 @@ class MPU6886:
             
         try:
             data = self.i2c.readfrom_mem(self.addr, 0x3B, 14)
-            
             def to_signed(msb, lsb):
                 val = (msb << 8) | lsb
                 return val if val < 32768 else val - 65536
@@ -294,7 +340,6 @@ class MPU6886:
             self.f_gz = (self.alpha * raw_gz) + ((1.0 - self.alpha) * self.f_gz)
 
             return self.f_ax, self.f_ay, self.f_az, self.f_gx, self.f_gy, self.f_gz
-            
         except OSError:
             return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
 
@@ -302,21 +347,24 @@ class MPU6886:
 # EDGE COMPUTING - GAME ENGINE
 # ==========================================
 class GameEngine:
-    def __init__(self, imu):
+    def __init__(self, imu, pmic):
         self.imu = imu
+        self.pmic = pmic
         self.baseline = None
         self.stable_frames = 0
         
-        # FUSION TUNING PARAMETERS (Moved from JS)
         self.GYRO_DEADZONE = 3.0
         self.ACCEL_DEADZONE = 0.08
         self.ACCEL_WEIGHT = 100.0
         self.PENALTY_MULTIPLIER = 0.5
         
-        # State
         self.accumulated_penalty = 0.0
         self.bx = 50.0
         self.by = 50.0
+        
+        # Battery state
+        self.bat_pct = 100
+        self.last_bat_check = 0
 
     def calibrate(self):
         self.baseline = self.imu.get_data()
@@ -326,120 +374,104 @@ class GameEngine:
         self.by = 50.0
 
     def update(self):
+        # 1. Update Game Logic
         data = self.imu.get_data()
         if not self.baseline:
             self.baseline = data
             
-        # 1. Calculate Gyro Wobble
         gx = data[3] - self.baseline[3]
         gy = data[4] - self.baseline[4]
         gz = data[5] - self.baseline[5]
         gyro_wobble = math.sqrt(gx*gx + gy*gy + gz*gz)
         
-        # 2. Calculate Accel Shift
         ax = data[0] - self.baseline[0]
         ay = data[1] - self.baseline[1]
         az = data[2] - self.baseline[2]
         accel_shift = math.sqrt(ax*ax + ay*ay + az*az)
         
-        # 3. Auto-Zero Logic (Protects against sensor drift over time)
         if gyro_wobble < 1.5 and accel_shift < 0.05:
             self.stable_frames += 1
             if self.stable_frames > 15:
-                self.baseline = data # Set new baseline silently
+                self.baseline = data 
                 self.stable_frames = 0
         else:
             self.stable_frames = 0
             
-        # 4. Apply Deadzones
         if gyro_wobble < self.GYRO_DEADZONE: gyro_wobble = 0
         if accel_shift < self.ACCEL_DEADZONE: accel_shift = 0
         
-        # 5. Sensor Fusion Logic
         combined = gyro_wobble + (accel_shift * self.ACCEL_WEIGHT)
         
         if combined > 0:
-            # We ACCUMULATE the penalty. If the network drops a packet,
-            # the next successful packet will send the total missed deduction.
             self.accumulated_penalty += (combined * self.PENALTY_MULTIPLIER)
-            
-            # Update visual bubble coordinates (constrained limits handled by JS)
             self.bx = 50 + (gy * 0.5) + (ax * 40)
             self.by = 50 + (gx * 0.5) + (ay * 40)
         else:
             self.bx = 50.0
             self.by = 50.0
+            
+        # 2. Update Battery (Throttled to save power on I2C bus)
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self.last_bat_check) > 5000:
+            self.bat_pct = self.pmic.get_battery_level()
+            self.last_bat_check = now
 
     def get_payload(self):
-        # Extract penalty and clear the accumulator for the next cycle
         p = self.accumulated_penalty
         self.accumulated_penalty = 0.0
-        return {"p": p, "bx": self.bx, "by": self.by}
+        return {"p": p, "bx": self.bx, "by": self.by, "bat": self.bat_pct}
 
 # ==========================================
 # SYSTEM SETUP: ACCESS POINT (AP MODE)
 # ==========================================
 def setup_ap():
-    # Configure device as Access Point
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     
-    # Set SSID and Password (authmode 3 = WPA2-PSK)
     ssid = "Equilibrium_M5"
     password = "12345678"
     ap.config(essid=ssid, password=password, authmode=3)
     
-    # Wait for AP to become active
     while not ap.active():
         time.sleep(0.5)
         
-    ip = ap.ifconfig()[0]
-    
-    print("\n" + "="*40)
-    print("🚀 M5Stick Access Point Ready!")
-    print(f"📡 Connect your phone to Wi-Fi: {ssid}")
-    print(f"🔑 Password: {password}")
-    print(f"🌐 Then open browser at: http://{ip}")
-    print("="*40 + "\n")
-    
-    return ip
+    return ap.ifconfig()[0]
 
 def main():
+    # --- EXTREME POWER SAVINGS ---
+    # Drop CPU frequency to 80MHz. (Cuts CPU power consumption by ~50%)
+    machine.freq(80000000)
+
     power_hold = machine.Pin(4, machine.Pin.OUT)
     power_hold.value(1)
 
+    # Disable screen backlight (Saves ~15-20mA). 
+    # Since the UI is strictly web-based, leaving the screen on wastes battery.
     backlight = machine.Pin(27, machine.Pin.OUT)
-    backlight.value(1)
+    backlight.value(0) 
 
     i2c = machine.I2C(0, scl=machine.Pin(22), sda=machine.Pin(21), freq=100000)
     imu = MPU6886(i2c)
+    pmic = StickPlus2Battery()
     
-    # Initialize Game Engine
-    engine = GameEngine(imu)
-
-    # Boot in AP Mode
+    engine = GameEngine(imu, pmic)
     ip_address = setup_ap()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('', 80))
     s.listen(5)
-    
-    # NON-BLOCKING SOCKET: Allows the Game Engine to run consistently
     s.setblocking(False) 
-    print("Server is running...")
 
     req_count = 0 
     last_engine_update = time.ticks_ms()
 
     while True:
-        # --- 1. EDGE PROCESSING CYCLE (Runs at ~50Hz) ---
         now = time.ticks_ms()
         if time.ticks_diff(now, last_engine_update) >= 20: 
             engine.update()
             last_engine_update = now
 
-        # --- 2. NETWORK HANDLING CYCLE ---
         try:
             conn, addr = s.accept()
             conn.settimeout(0.5) 
@@ -451,13 +483,8 @@ def main():
                 continue
                 
             if request.startswith('GET /data'):
-                # Send the accumulated payload
                 response_data = json.dumps(engine.get_payload())
-                
-                conn.send('HTTP/1.1 200 OK\r\n'.encode('utf-8'))
-                conn.send('Content-Type: application/json\r\n'.encode('utf-8'))
-                conn.send('Access-Control-Allow-Origin: *\r\n'.encode('utf-8'))
-                conn.send('Connection: close\r\n\r\n'.encode('utf-8'))
+                conn.send('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n'.encode('utf-8'))
                 conn.send(response_data.encode('utf-8'))
                 
             elif request.startswith('GET /calibrate'):
@@ -476,8 +503,10 @@ def main():
                 req_count = 0
             
         except OSError:
-            # Expected behavior for non-blocking socket when no request is waiting
-            pass
+            # Yield CPU to idle. This stops the endless while True 
+            # loop from running at 100% capacity, massive power saver.
+            time.sleep_ms(5)
+            
         except Exception as e:
             try:
                 conn.close()
