@@ -356,7 +356,7 @@ class GameEngine:
         
         # --- TUNED FOR BREATHING INSENSITIVITY ---
         self.GYRO_DEADZONE = 8.0      # Was 3.0: Ignores slow rotational chest movement
-        self.ACCEL_DEADZONE = 0.20    # Was 0.08: Ignores linear chest expansion
+        self.ACCEL_DEADZONE = 0.14    # Was 0.08: Ignores linear chest expansion
         self.ACCEL_WEIGHT = 70.0      # Was 100.0: Reduces harshness of linear shifts
         self.PENALTY_MULTIPLIER = 0.3 # Was 0.5: Slows down the point drain
         
