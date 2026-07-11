@@ -56,12 +56,18 @@ HTML_PAGE = """<!DOCTYPE html>
         .final-score { font-size: 4.5rem; font-weight: 900; color: var(--accent); margin: 15px 0; }
         .badge { padding: 6px 20px; border-radius: 20px; font-size: 1rem; font-weight: bold; text-transform: uppercase; border: 2px solid var(--primary); color: var(--accent); background-color: rgba(37, 99, 235, 0.15); }
 
-        /* BATTERY INDICATOR STYLING */
-        .bat-status { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.5); padding: 5px 12px; border-radius: 20px; font-size: 0.9rem; font-weight: bold; color: var(--accent); border: 1px solid var(--border); z-index: 100; box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+        /* STATUS BADGES */
+        .status-bar { position: absolute; top: 15px; width: 100%; padding: 0 15px; display: flex; justify-content: space-between; z-index: 100; pointer-events: none; }
+        .badge-ui { background: rgba(0,0,0,0.5); padding: 5px 12px; border-radius: 20px; font-size: 0.9rem; font-weight: bold; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+        .wifi-status { color: #4ade80; }
+        .bat-status { color: var(--accent); }
     </style>
 </head>
 <body>
-    <div id="bat-status" class="bat-status">🔋 --%</div>
+    <div class="status-bar">
+        <div id="wifi-status" class="badge-ui wifi-status">🟢 Connected</div>
+        <div id="bat-status" class="badge-ui bat-status">🔋 --%</div>
+    </div>
 
     <div id="screen-home" class="screen container">
         <div class="card">
@@ -136,18 +142,37 @@ HTML_PAGE = """<!DOCTYPE html>
         const screens = { home: document.getElementById('screen-home'), calibrating: document.getElementById('screen-calibrating'), game: document.getElementById('screen-game'), results: document.getElementById('screen-results') };
         const bubble = document.getElementById('wobble-bubble'), timerText = document.getElementById('timer-text'), liveScoreText = document.getElementById('live-score-text');
         const batStatus = document.getElementById('bat-status');
+        const wifiStatus = document.getElementById('wifi-status');
 
         function switchScreen(s) { 
             Object.values(screens).forEach(scr => scr.classList.add('hidden')); 
             screens[s].classList.remove('hidden'); 
         }
 
+        function updateConnectionState(isOnline) {
+            if (isOnline) {
+                if (wifiStatus.innerText !== '🟢 Connected') {
+                    wifiStatus.innerText = '🟢 Connected';
+                    wifiStatus.style.color = '#4ade80';
+                }
+            } else {
+                if (wifiStatus.innerText !== '🔴 Offline') {
+                    wifiStatus.innerText = '🔴 Offline';
+                    wifiStatus.style.color = '#ef4444';
+                }
+            }
+        }
+
         async function fetchIMU() {
             try {
-                const res = await fetch('/data', { signal: AbortSignal.timeout(200) });
+                // Slightly increased timeout to 300ms to allow for ESP32 garbage collection pauses 
+                // without immediately triggering a false "Offline" state.
+                const res = await fetch('/data', { signal: AbortSignal.timeout(300) });
                 if (!res.ok) throw new Error("Network error");
+                updateConnectionState(true);
                 return await res.json();
             } catch (e) { 
+                updateConnectionState(false);
                 return null; 
             }
         }
@@ -196,7 +221,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
         async function pollIMU() {
             if (!isPlaying) {
-                // Keep polling slowly in background just for battery when not playing
+                // Keep polling slowly in background just for battery & connection status when not playing
                 setTimeout(backgroundPoll, 2000);
                 return;
             }
@@ -262,7 +287,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 b.style.borderColor = "#ef4444"; b.style.color = "#fca5a5"; b.style.backgroundColor = "rgba(239, 68, 68, 0.15)";
             }
             switchScreen('results');
-            backgroundPoll(); // Resume background battery polling
+            backgroundPoll(); // Resume background polling
         }
         function resetGame() { switchScreen('home'); }
         
@@ -277,20 +302,17 @@ HTML_PAGE = """<!DOCTYPE html>
 # ==========================================
 class StickPlus2Battery:
     def __init__(self):
-        # The Plus 2 reads battery voltage via an internal divider on Pin 38
         self.adc = machine.ADC(machine.Pin(38))
-        self.adc.atten(machine.ADC.ATTN_11DB) # Configure for wider voltage range
+        self.adc.atten(machine.ADC.ATTN_11DB)
         self.adc.width(machine.ADC.WIDTH_12BIT)
 
     def get_battery_level(self):
         try:
             raw = self.adc.read()
-            # On the Plus 2, the 12-bit ADC reads ~2600 at 4.2V (100% full) 
-            # and roughly ~1900 at 3.2V (0% empty)
             pct = ((raw - 1900) / 700.0) * 100
             return max(0, min(100, int(pct)))
         except Exception:
-            return 100 # Fallback so the game doesn't crash if reading fails
+            return 100 
 
 # ==========================================
 # MPU6886 FULL 6-AXIS DRIVER
@@ -351,20 +373,18 @@ class GameEngine:
         self.imu = imu
         self.pmic = pmic
         self.baseline = None
-        self.last_data = None  # Tracks immediate previous frame for stability
+        self.last_data = None  
         self.stable_frames = 0
         
-        # --- TUNED FOR BREATHING INSENSITIVITY ---
-        self.GYRO_DEADZONE = 8.0      # Was 3.0: Ignores slow rotational chest movement
-        self.ACCEL_DEADZONE = 0.14    # Was 0.08: Ignores linear chest expansion
-        self.ACCEL_WEIGHT = 70.0      # Was 100.0: Reduces harshness of linear shifts
-        self.PENALTY_MULTIPLIER = 0.3 # Was 0.5: Slows down the point drain
+        self.GYRO_DEADZONE = 8.0      
+        self.ACCEL_DEADZONE = 0.20    
+        self.ACCEL_WEIGHT = 70.0      
+        self.PENALTY_MULTIPLIER = 0.3 
         
         self.accumulated_penalty = 0.0
         self.bx = 50.0
         self.by = 50.0
         
-        # Battery state
         self.bat_pct = 100
         self.last_bat_check = 0
 
@@ -377,7 +397,6 @@ class GameEngine:
         self.by = 50.0
 
     def update(self):
-        # 1. Fetch Current Data
         data = self.imu.get_data()
         
         if not self.baseline:
@@ -385,7 +404,6 @@ class GameEngine:
         if not self.last_data:
             self.last_data = data
             
-        # 2. Check Frame-to-Frame Stability (Are they holding still RIGHT NOW?)
         inst_ax = data[0] - self.last_data[0]
         inst_ay = data[1] - self.last_data[1]
         inst_az = data[2] - self.last_data[2]
@@ -396,20 +414,16 @@ class GameEngine:
         inst_gz = data[5] - self.last_data[5]
         inst_gyro_shift = math.sqrt(inst_gx**2 + inst_gy**2 + inst_gz**2)
         
-        # If instantaneous movement is very low, they stopped moving
         if inst_gyro_shift < 1.5 and inst_accel_shift < 0.02:
             self.stable_frames += 1
             if self.stable_frames > 15:
-                # Re-calibrate baseline to this new bent position!
                 self.baseline = data 
                 self.stable_frames = 0
         else:
             self.stable_frames = 0
             
-        # Update last_data for the next loop
         self.last_data = data 
             
-        # 3. Calculate Wobble against the CURRENT Baseline to apply penalties
         gx = data[3] - self.baseline[3]
         gy = data[4] - self.baseline[4]
         gz = data[5] - self.baseline[5]
@@ -420,7 +434,6 @@ class GameEngine:
         az = data[2] - self.baseline[2]
         accel_shift = math.sqrt(ax**2 + ay**2 + az**2)
         
-        # APPLY DEADZONES
         if gyro_wobble < self.GYRO_DEADZONE: gyro_wobble = 0
         if accel_shift < self.ACCEL_DEADZONE: accel_shift = 0
         
@@ -434,7 +447,6 @@ class GameEngine:
             self.bx = 50.0
             self.by = 50.0
             
-        # 4. Update Battery (Throttled)
         now = time.ticks_ms()
         if time.ticks_diff(now, self.last_bat_check) > 5000:
             self.bat_pct = self.pmic.get_battery_level()
@@ -462,15 +474,11 @@ def setup_ap():
     return ap.ifconfig()[0]
 
 def main():
-    # --- EXTREME POWER SAVINGS ---
-    # Drop CPU frequency to 80MHz. (Cuts CPU power consumption by ~50%)
     machine.freq(80000000)
 
     power_hold = machine.Pin(4, machine.Pin.OUT)
     power_hold.value(1)
 
-    # Disable screen backlight (Saves ~15-20mA). 
-    # Since the UI is strictly web-based, leaving the screen on wastes battery.
     backlight = machine.Pin(27, machine.Pin.OUT)
     backlight.value(0) 
 
@@ -487,7 +495,6 @@ def main():
     s.listen(5)
     s.setblocking(False) 
 
-    # --- SERVER STARTUP LOG ---
     print("-" * 40)
     print("🚀 Equilibrium Game Server is UP and RUNNING!")
     print("📡 Wi-Fi SSID: Equilibrium_M5")
@@ -534,8 +541,6 @@ def main():
                 req_count = 0
             
         except OSError:
-            # Yield CPU to idle. This stops the endless while True 
-            # loop from running at 100% capacity, massive power saver.
             time.sleep_ms(5)
             
         except Exception as e:
