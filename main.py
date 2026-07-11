@@ -353,10 +353,11 @@ class GameEngine:
         self.baseline = None
         self.stable_frames = 0
         
-        self.GYRO_DEADZONE = 3.0
-        self.ACCEL_DEADZONE = 0.08
-        self.ACCEL_WEIGHT = 100.0
-        self.PENALTY_MULTIPLIER = 0.5
+        # --- TUNED FOR BREATHING INSENSITIVITY ---
+        self.GYRO_DEADZONE = 8.0      # Was 3.0: Ignores slow rotational chest movement
+        self.ACCEL_DEADZONE = 0.20    # Was 0.08: Ignores linear chest expansion
+        self.ACCEL_WEIGHT = 70.0      # Was 100.0: Reduces harshness of linear shifts
+        self.PENALTY_MULTIPLIER = 0.3 # Was 0.5: Slows down the point drain
         
         self.accumulated_penalty = 0.0
         self.bx = 50.0
@@ -397,6 +398,7 @@ class GameEngine:
         else:
             self.stable_frames = 0
             
+        # APPLY DEADZONES (This is where breathing is filtered out)
         if gyro_wobble < self.GYRO_DEADZONE: gyro_wobble = 0
         if accel_shift < self.ACCEL_DEADZONE: accel_shift = 0
         
