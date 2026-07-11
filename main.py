@@ -351,6 +351,7 @@ class GameEngine:
         self.imu = imu
         self.pmic = pmic
         self.baseline = None
+        self.last_data = None  # Tracks immediate previous frame for stability
         self.stable_frames = 0
         
         # --- TUNED FOR BREATHING INSENSITIVITY ---
@@ -369,36 +370,57 @@ class GameEngine:
 
     def calibrate(self):
         self.baseline = self.imu.get_data()
+        self.last_data = self.baseline
         self.stable_frames = 0
         self.accumulated_penalty = 0.0
         self.bx = 50.0
         self.by = 50.0
 
     def update(self):
-        # 1. Update Game Logic
+        # 1. Fetch Current Data
         data = self.imu.get_data()
+        
         if not self.baseline:
             self.baseline = data
+        if not self.last_data:
+            self.last_data = data
             
-        gx = data[3] - self.baseline[3]
-        gy = data[4] - self.baseline[4]
-        gz = data[5] - self.baseline[5]
-        gyro_wobble = math.sqrt(gx*gx + gy*gy + gz*gz)
+        # 2. Check Frame-to-Frame Stability (Are they holding still RIGHT NOW?)
+        inst_ax = data[0] - self.last_data[0]
+        inst_ay = data[1] - self.last_data[1]
+        inst_az = data[2] - self.last_data[2]
+        inst_accel_shift = math.sqrt(inst_ax**2 + inst_ay**2 + inst_az**2)
         
-        ax = data[0] - self.baseline[0]
-        ay = data[1] - self.baseline[1]
-        az = data[2] - self.baseline[2]
-        accel_shift = math.sqrt(ax*ax + ay*ay + az*az)
+        inst_gx = data[3] - self.last_data[3]
+        inst_gy = data[4] - self.last_data[4]
+        inst_gz = data[5] - self.last_data[5]
+        inst_gyro_shift = math.sqrt(inst_gx**2 + inst_gy**2 + inst_gz**2)
         
-        if gyro_wobble < 1.5 and accel_shift < 0.05:
+        # If instantaneous movement is very low, they stopped moving
+        if inst_gyro_shift < 1.5 and inst_accel_shift < 0.02:
             self.stable_frames += 1
             if self.stable_frames > 15:
+                # Re-calibrate baseline to this new bent position!
                 self.baseline = data 
                 self.stable_frames = 0
         else:
             self.stable_frames = 0
             
-        # APPLY DEADZONES (This is where breathing is filtered out)
+        # Update last_data for the next loop
+        self.last_data = data 
+            
+        # 3. Calculate Wobble against the CURRENT Baseline to apply penalties
+        gx = data[3] - self.baseline[3]
+        gy = data[4] - self.baseline[4]
+        gz = data[5] - self.baseline[5]
+        gyro_wobble = math.sqrt(gx**2 + gy**2 + gz**2)
+        
+        ax = data[0] - self.baseline[0]
+        ay = data[1] - self.baseline[1]
+        az = data[2] - self.baseline[2]
+        accel_shift = math.sqrt(ax**2 + ay**2 + az**2)
+        
+        # APPLY DEADZONES
         if gyro_wobble < self.GYRO_DEADZONE: gyro_wobble = 0
         if accel_shift < self.ACCEL_DEADZONE: accel_shift = 0
         
@@ -412,7 +434,7 @@ class GameEngine:
             self.bx = 50.0
             self.by = 50.0
             
-        # 2. Update Battery (Throttled to save power on I2C bus)
+        # 4. Update Battery (Throttled)
         now = time.ticks_ms()
         if time.ticks_diff(now, self.last_bat_check) > 5000:
             self.bat_pct = self.pmic.get_battery_level()
@@ -464,6 +486,13 @@ def main():
     s.bind(('', 80))
     s.listen(5)
     s.setblocking(False) 
+
+    # --- SERVER STARTUP LOG ---
+    print("-" * 40)
+    print("🚀 Equilibrium Game Server is UP and RUNNING!")
+    print("📡 Wi-Fi SSID: Equilibrium_M5")
+    print("🌐 Connect to: http://{}".format(ip_address))
+    print("-" * 40)
 
     req_count = 0 
     last_engine_update = time.ticks_ms()
