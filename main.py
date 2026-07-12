@@ -1,10 +1,11 @@
-import network
-import machine
+import gc
+import json
+import math
 import socket
 import time
-import json
-import gc
-import math
+
+import machine
+import network
 
 # ==========================================
 # HTML INTERFACE (Embedded - 100% Offline)
@@ -297,6 +298,7 @@ HTML_PAGE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+
 # ==========================================
 # BATTERY MONITOR (M5StickC Plus 2)
 # ==========================================
@@ -312,7 +314,8 @@ class StickPlus2Battery:
             pct = ((raw - 1900) / 700.0) * 100
             return max(0, min(100, int(pct)))
         except Exception:
-            return 100 
+            return 100
+
 
 # ==========================================
 # MPU6886 FULL 6-AXIS DRIVER
@@ -321,19 +324,19 @@ class MPU6886:
     def __init__(self, i2c):
         self.i2c = i2c
         self.addr = 0x68
-        self.alpha = 0.3 
-        
+        self.alpha = 0.3
+
         self.f_ax, self.f_ay, self.f_az = 0.0, 0.0, 1.0
         self.f_gx, self.f_gy, self.f_gz = 0.0, 0.0, 0.0
-        
+
         # Pre-allocate array to avoid tuple generation per frame
         self.sensor_data = [0.0] * 6
 
         try:
-            self.i2c.writeto_mem(self.addr, 0x6B, b'\x00') 
+            self.i2c.writeto_mem(self.addr, 0x6B, b"\x00")
             time.sleep_ms(10)
-            self.i2c.writeto_mem(self.addr, 0x1C, b'\x10') 
-            self.i2c.writeto_mem(self.addr, 0x1B, b'\x18') 
+            self.i2c.writeto_mem(self.addr, 0x1C, b"\x10")
+            self.i2c.writeto_mem(self.addr, 0x1B, b"\x18")
             self.connected = True
         except OSError:
             self.connected = False
@@ -341,25 +344,26 @@ class MPU6886:
     def get_data(self):
         if not self.connected:
             return self.sensor_data
-            
+
         try:
             data = self.i2c.readfrom_mem(self.addr, 0x3B, 14)
+
             def to_signed(msb, lsb):
                 val = (msb << 8) | lsb
                 return val if val < 32768 else val - 65536
-                
+
             raw_ax = to_signed(data[0], data[1]) / 4096.0
             raw_ay = to_signed(data[2], data[3]) / 4096.0
             raw_az = to_signed(data[4], data[5]) / 4096.0
-            
+
             raw_gx = to_signed(data[8], data[9]) / 16.4
             raw_gy = to_signed(data[10], data[11]) / 16.4
             raw_gz = to_signed(data[12], data[13]) / 16.4
-            
+
             self.f_ax = (self.alpha * raw_ax) + ((1.0 - self.alpha) * self.f_ax)
             self.f_ay = (self.alpha * raw_ay) + ((1.0 - self.alpha) * self.f_ay)
             self.f_az = (self.alpha * raw_az) + ((1.0 - self.alpha) * self.f_az)
-            
+
             self.f_gx = (self.alpha * raw_gx) + ((1.0 - self.alpha) * self.f_gx)
             self.f_gy = (self.alpha * raw_gy) + ((1.0 - self.alpha) * self.f_gy)
             self.f_gz = (self.alpha * raw_gz) + ((1.0 - self.alpha) * self.f_gz)
@@ -371,10 +375,11 @@ class MPU6886:
             self.sensor_data[3] = self.f_gx
             self.sensor_data[4] = self.f_gy
             self.sensor_data[5] = self.f_gz
-            
+
             return self.sensor_data
         except OSError:
             return self.sensor_data
+
 
 # ==========================================
 # EDGE COMPUTING - GAME ENGINE
@@ -383,25 +388,25 @@ class GameEngine:
     def __init__(self, imu, pmic):
         self.imu = imu
         self.pmic = pmic
-        
+
         # Pre-allocate static lists for deep copying without new objects
         self.baseline = [0.0] * 6
-        self.last_data = [0.0] * 6  
+        self.last_data = [0.0] * 6
         self.is_calibrated = False
         self.stable_frames = 0
-        
-        self.GYRO_DEADZONE = 8.0      
-        self.ACCEL_DEADZONE = 0.20    
-        self.ACCEL_WEIGHT = 70.0      
-        self.PENALTY_MULTIPLIER = 0.3 
-        
+
+        self.GYRO_DEADZONE = 8.0
+        self.ACCEL_DEADZONE = 0.20
+        self.ACCEL_WEIGHT = 70.0
+        self.PENALTY_MULTIPLIER = 0.3
+
         self.accumulated_penalty = 0.0
         self.bx = 50.0
         self.by = 50.0
-        
+
         self.bat_pct = 100
         self.last_bat_check = 0
-        
+
         # Pre-allocate dictionary payload to prevent allocation per request
         self.payload = {"p": 0.0, "bx": 50.0, "by": 50.0, "bat": 100}
 
@@ -418,23 +423,23 @@ class GameEngine:
 
     def update(self):
         data = self.imu.get_data()
-        
+
         if not self.is_calibrated:
             for i in range(6):
                 self.baseline[i] = data[i]
                 self.last_data[i] = data[i]
             self.is_calibrated = True
-            
+
         inst_ax = data[0] - self.last_data[0]
         inst_ay = data[1] - self.last_data[1]
         inst_az = data[2] - self.last_data[2]
         inst_accel_shift = math.sqrt(inst_ax**2 + inst_ay**2 + inst_az**2)
-        
+
         inst_gx = data[3] - self.last_data[3]
         inst_gy = data[4] - self.last_data[4]
         inst_gz = data[5] - self.last_data[5]
         inst_gyro_shift = math.sqrt(inst_gx**2 + inst_gy**2 + inst_gz**2)
-        
+
         if inst_gyro_shift < 1.5 and inst_accel_shift < 0.02:
             self.stable_frames += 1
             if self.stable_frames > 15:
@@ -443,34 +448,36 @@ class GameEngine:
                 self.stable_frames = 0
         else:
             self.stable_frames = 0
-            
+
         # Copy data explicitly to last_data buffer
         for i in range(6):
             self.last_data[i] = data[i]
-            
+
         gx = data[3] - self.baseline[3]
         gy = data[4] - self.baseline[4]
         gz = data[5] - self.baseline[5]
         gyro_wobble = math.sqrt(gx**2 + gy**2 + gz**2)
-        
+
         ax = data[0] - self.baseline[0]
         ay = data[1] - self.baseline[1]
         az = data[2] - self.baseline[2]
         accel_shift = math.sqrt(ax**2 + ay**2 + az**2)
-        
-        if gyro_wobble < self.GYRO_DEADZONE: gyro_wobble = 0
-        if accel_shift < self.ACCEL_DEADZONE: accel_shift = 0
-        
+
+        if gyro_wobble < self.GYRO_DEADZONE:
+            gyro_wobble = 0
+        if accel_shift < self.ACCEL_DEADZONE:
+            accel_shift = 0
+
         combined = gyro_wobble + (accel_shift * self.ACCEL_WEIGHT)
-        
+
         if combined > 0:
-            self.accumulated_penalty += (combined * self.PENALTY_MULTIPLIER)
+            self.accumulated_penalty += combined * self.PENALTY_MULTIPLIER
             self.bx = 50 + (gy * 0.5) + (ax * 40)
             self.by = 50 + (gx * 0.5) + (ay * 40)
         else:
             self.bx = 50.0
             self.by = 50.0
-            
+
         now = time.ticks_ms()
         if time.ticks_diff(now, self.last_bat_check) > 5000:
             self.bat_pct = self.pmic.get_battery_level()
@@ -482,9 +489,10 @@ class GameEngine:
         self.payload["bx"] = self.bx
         self.payload["by"] = self.by
         self.payload["bat"] = self.bat_pct
-        
+
         self.accumulated_penalty = 0.0
         return self.payload
+
 
 # ==========================================
 # SYSTEM SETUP: ACCESS POINT (AP MODE)
@@ -492,15 +500,16 @@ class GameEngine:
 def setup_ap():
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
-    
+
     ssid = "Equilibrium_M5"
     password = "12345678"
     ap.config(essid=ssid, password=password, authmode=3)
-    
+
     while not ap.active():
         time.sleep(0.5)
-        
+
     return ap.ifconfig()[0]
+
 
 def main():
     machine.freq(80000000)
@@ -509,27 +518,29 @@ def main():
     power_hold.value(1)
 
     backlight = machine.Pin(27, machine.Pin.OUT)
-    backlight.value(0) 
+    backlight.value(0)
 
     i2c = machine.I2C(0, scl=machine.Pin(22), sda=machine.Pin(21), freq=100000)
     imu = MPU6886(i2c)
     pmic = StickPlus2Battery()
-    
+
     engine = GameEngine(imu, pmic)
     ip_address = setup_ap()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('', 80))
+    s.bind(("", 80))
     s.listen(5)
-    s.setblocking(False) 
+    s.setblocking(False)
 
     # --- PRE-ALLOCATED STATIC BYTE STRINGS ---
     # Stops strings/bytes from being generated on every socket request
-    HTTP_JSON = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n'
-    HTTP_CALIB = b'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK'
-    HTTP_HTML = b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n'
-    HTML_BYTES = HTML_PAGE.encode('utf-8')
+    HTTP_JSON = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+    HTTP_CALIB = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK"
+    HTTP_HTML = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+    )
+    HTML_BYTES = HTML_PAGE.encode("utf-8")
 
     print("-" * 40)
     print("🚀 Equilibrium Game Server is UP and RUNNING!")
@@ -539,6 +550,7 @@ def main():
 
     req_count = 0 
     last_engine_update = time.ticks_ms()
+    client_conn = None # Track our single persistent connection
 
     while True:
         now = time.ticks_ms()
@@ -546,46 +558,65 @@ def main():
             engine.update()
             last_engine_update = now
 
+        # 1. Accept a new connection ONLY if we don't have one active
+        if client_conn is None:
+            try:
+                client_conn, addr = s.accept()
+                client_conn.settimeout(0.02)  # 20ms timeout for non-blocking reads
+            except OSError:
+                time.sleep_ms(5)
+                continue
+
+        # 2. We have an active connection, try to read from it
         try:
-            conn, addr = s.accept()
-            conn.settimeout(0.5) 
+            request = client_conn.recv(1024)
             
-            # Read socket data strictly as bytes without decoding it to a string object
-            request = conn.recv(512)
-            
-            if not request:
-                conn.close()
+            # If recv returns empty bytes, the client cleanly disconnected
+            if request == b'':
+                client_conn.close()
+                client_conn = None
                 continue
                 
-            if request.startswith(b'GET /data'):
-                # json.dumps allocates a small string, but it's unavoidable.
+            if b'GET /data' in request:
                 payload_bytes = json.dumps(engine.get_payload()).encode('utf-8')
-                conn.sendall(HTTP_JSON)
-                conn.sendall(payload_bytes)
                 
-            elif request.startswith(b'GET /calibrate'):
+                # CRITICAL FIX: Keep-Alive + Content-Length forces the browser to reuse the TCP socket
+                header = f'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: {len(payload_bytes)}\r\n\r\n'.encode('utf-8')
+                client_conn.sendall(header + payload_bytes)
+                
+                req_count += 1
+                if req_count > 50:
+                    gc.collect()
+                    req_count = 0
+                
+            elif b'GET /calibrate' in request:
                 engine.calibrate()
-                conn.sendall(HTTP_CALIB)
+                header = b'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nOK'
+                client_conn.sendall(header)
                 
-            elif request.startswith(b'GET / '):
-                conn.sendall(HTTP_HTML)
-                conn.sendall(HTML_BYTES)
+            elif b'GET / ' in request:
+                header = f'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: {len(HTML_BYTES)}\r\n\r\n'.encode('utf-8')
+                client_conn.sendall(header + HTML_BYTES)
+                # We close after serving HTML so the browser sets up a fresh keep-alive specifically for the JS fetch loop
+                client_conn.close()
+                client_conn = None
                 
-            conn.close()
-            
-            req_count += 1
-            if req_count > 50:
-                gc.collect()
-                req_count = 0
-            
-        except OSError:
-            time.sleep_ms(5)
-            
-        except Exception:
-            try:
-                conn.close()
-            except:
+        except OSError as e:
+            # EAGAIN (11) or ETIMEDOUT (110) means the browser is just idle between the 80ms polls. We keep the socket alive!
+            if len(e.args) > 0 and e.args[0] in (11, 110):
                 pass
+            else:
+                # A different socket error (like ECONNRESET) means the connection broke
+                try: client_conn.close()
+                except: pass
+                client_conn = None
+                
+        except Exception:
+            # Catch-all for unexpected parsing errors to keep the server alive
+            try: client_conn.close()
+            except: pass
+            client_conn = None
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
