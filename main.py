@@ -325,6 +325,9 @@ class MPU6886:
         
         self.f_ax, self.f_ay, self.f_az = 0.0, 0.0, 1.0
         self.f_gx, self.f_gy, self.f_gz = 0.0, 0.0, 0.0
+        
+        # Pre-allocate array to avoid tuple generation per frame
+        self.sensor_data = [0.0] * 6
 
         try:
             self.i2c.writeto_mem(self.addr, 0x6B, b'\x00') 
@@ -337,7 +340,7 @@ class MPU6886:
 
     def get_data(self):
         if not self.connected:
-            return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
+            return self.sensor_data
             
         try:
             data = self.i2c.readfrom_mem(self.addr, 0x3B, 14)
@@ -361,9 +364,17 @@ class MPU6886:
             self.f_gy = (self.alpha * raw_gy) + ((1.0 - self.alpha) * self.f_gy)
             self.f_gz = (self.alpha * raw_gz) + ((1.0 - self.alpha) * self.f_gz)
 
-            return self.f_ax, self.f_ay, self.f_az, self.f_gx, self.f_gy, self.f_gz
+            # Update static list in-place
+            self.sensor_data[0] = self.f_ax
+            self.sensor_data[1] = self.f_ay
+            self.sensor_data[2] = self.f_az
+            self.sensor_data[3] = self.f_gx
+            self.sensor_data[4] = self.f_gy
+            self.sensor_data[5] = self.f_gz
+            
+            return self.sensor_data
         except OSError:
-            return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
+            return self.sensor_data
 
 # ==========================================
 # EDGE COMPUTING - GAME ENGINE
@@ -372,8 +383,11 @@ class GameEngine:
     def __init__(self, imu, pmic):
         self.imu = imu
         self.pmic = pmic
-        self.baseline = None
-        self.last_data = None  
+        
+        # Pre-allocate static lists for deep copying without new objects
+        self.baseline = [0.0] * 6
+        self.last_data = [0.0] * 6  
+        self.is_calibrated = False
         self.stable_frames = 0
         
         self.GYRO_DEADZONE = 8.0      
@@ -387,10 +401,16 @@ class GameEngine:
         
         self.bat_pct = 100
         self.last_bat_check = 0
+        
+        # Pre-allocate dictionary payload to prevent allocation per request
+        self.payload = {"p": 0.0, "bx": 50.0, "by": 50.0, "bat": 100}
 
     def calibrate(self):
-        self.baseline = self.imu.get_data()
-        self.last_data = self.baseline
+        data = self.imu.get_data()
+        for i in range(6):
+            self.baseline[i] = data[i]
+            self.last_data[i] = data[i]
+        self.is_calibrated = True
         self.stable_frames = 0
         self.accumulated_penalty = 0.0
         self.bx = 50.0
@@ -399,10 +419,11 @@ class GameEngine:
     def update(self):
         data = self.imu.get_data()
         
-        if not self.baseline:
-            self.baseline = data
-        if not self.last_data:
-            self.last_data = data
+        if not self.is_calibrated:
+            for i in range(6):
+                self.baseline[i] = data[i]
+                self.last_data[i] = data[i]
+            self.is_calibrated = True
             
         inst_ax = data[0] - self.last_data[0]
         inst_ay = data[1] - self.last_data[1]
@@ -417,12 +438,15 @@ class GameEngine:
         if inst_gyro_shift < 1.5 and inst_accel_shift < 0.02:
             self.stable_frames += 1
             if self.stable_frames > 15:
-                self.baseline = data 
+                for i in range(6):
+                    self.baseline[i] = data[i]
                 self.stable_frames = 0
         else:
             self.stable_frames = 0
             
-        self.last_data = data 
+        # Copy data explicitly to last_data buffer
+        for i in range(6):
+            self.last_data[i] = data[i]
             
         gx = data[3] - self.baseline[3]
         gy = data[4] - self.baseline[4]
@@ -453,9 +477,14 @@ class GameEngine:
             self.last_bat_check = now
 
     def get_payload(self):
-        p = self.accumulated_penalty
+        # Update pre-allocated dictionary instead of making a new one
+        self.payload["p"] = self.accumulated_penalty
+        self.payload["bx"] = self.bx
+        self.payload["by"] = self.by
+        self.payload["bat"] = self.bat_pct
+        
         self.accumulated_penalty = 0.0
-        return {"p": p, "bx": self.bx, "by": self.by, "bat": self.bat_pct}
+        return self.payload
 
 # ==========================================
 # SYSTEM SETUP: ACCESS POINT (AP MODE)
@@ -495,6 +524,13 @@ def main():
     s.listen(5)
     s.setblocking(False) 
 
+    # --- PRE-ALLOCATED STATIC BYTE STRINGS ---
+    # Stops strings/bytes from being generated on every socket request
+    HTTP_JSON = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n'
+    HTTP_CALIB = b'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK'
+    HTTP_HTML = b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n'
+    HTML_BYTES = HTML_PAGE.encode('utf-8')
+
     print("-" * 40)
     print("🚀 Equilibrium Game Server is UP and RUNNING!")
     print("📡 Wi-Fi SSID: Equilibrium_M5")
@@ -514,24 +550,26 @@ def main():
             conn, addr = s.accept()
             conn.settimeout(0.5) 
             
-            request = conn.recv(512).decode('utf-8')
+            # Read socket data strictly as bytes without decoding it to a string object
+            request = conn.recv(512)
             
             if not request:
                 conn.close()
                 continue
                 
-            if request.startswith('GET /data'):
-                response_data = json.dumps(engine.get_payload())
-                conn.send('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n'.encode('utf-8'))
-                conn.send(response_data.encode('utf-8'))
+            if request.startswith(b'GET /data'):
+                # json.dumps allocates a small string, but it's unavoidable.
+                payload_bytes = json.dumps(engine.get_payload()).encode('utf-8')
+                conn.sendall(HTTP_JSON)
+                conn.sendall(payload_bytes)
                 
-            elif request.startswith('GET /calibrate'):
+            elif request.startswith(b'GET /calibrate'):
                 engine.calibrate()
-                conn.send('HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK'.encode('utf-8'))
+                conn.sendall(HTTP_CALIB)
                 
-            elif request.startswith('GET / '):
-                conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n'.encode('utf-8'))
-                conn.sendall(HTML_PAGE.encode('utf-8'))
+            elif request.startswith(b'GET / '):
+                conn.sendall(HTTP_HTML)
+                conn.sendall(HTML_BYTES)
                 
             conn.close()
             
@@ -543,7 +581,7 @@ def main():
         except OSError:
             time.sleep_ms(5)
             
-        except Exception as e:
+        except Exception:
             try:
                 conn.close()
             except:
