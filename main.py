@@ -1,6 +1,7 @@
 import gc
 import json
 import math
+import select
 import socket
 import time
 
@@ -166,8 +167,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
         async function fetchIMU() {
             try {
-                // Slightly increased timeout to 300ms to allow for ESP32 garbage collection pauses 
-                // without immediately triggering a false "Offline" state.
                 const res = await fetch('/data', { signal: AbortSignal.timeout(300) });
                 if (!res.ok) throw new Error("Network error");
                 updateConnectionState(true);
@@ -222,7 +221,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
         async function pollIMU() {
             if (!isPlaying) {
-                // Keep polling slowly in background just for battery & connection status when not playing
                 setTimeout(backgroundPoll, 2000);
                 return;
             }
@@ -245,7 +243,6 @@ HTML_PAGE = """<!DOCTYPE html>
             const data = await fetchIMU();
             if (!data) return; 
             
-            // UPDATE BATTERY UI
             if (data.bat !== undefined) {
                 batStatus.innerText = `🔋 ${data.bat}%`;
                 if (data.bat <= 20) batStatus.style.color = "#ef4444";
@@ -288,11 +285,10 @@ HTML_PAGE = """<!DOCTYPE html>
                 b.style.borderColor = "#ef4444"; b.style.color = "#fca5a5"; b.style.backgroundColor = "rgba(239, 68, 68, 0.15)";
             }
             switchScreen('results');
-            backgroundPoll(); // Resume background polling
+            backgroundPoll();
         }
         function resetGame() { switchScreen('home'); }
         
-        // Start background polling on load
         backgroundPoll();
     </script>
 </body>
@@ -329,7 +325,6 @@ class MPU6886:
         self.f_ax, self.f_ay, self.f_az = 0.0, 0.0, 1.0
         self.f_gx, self.f_gy, self.f_gz = 0.0, 0.0, 0.0
 
-        # Pre-allocate array to avoid tuple generation per frame
         self.sensor_data = [0.0] * 6
 
         try:
@@ -368,7 +363,6 @@ class MPU6886:
             self.f_gy = (self.alpha * raw_gy) + ((1.0 - self.alpha) * self.f_gy)
             self.f_gz = (self.alpha * raw_gz) + ((1.0 - self.alpha) * self.f_gz)
 
-            # Update static list in-place
             self.sensor_data[0] = self.f_ax
             self.sensor_data[1] = self.f_ay
             self.sensor_data[2] = self.f_az
@@ -389,7 +383,6 @@ class GameEngine:
         self.imu = imu
         self.pmic = pmic
 
-        # Pre-allocate static lists for deep copying without new objects
         self.baseline = [0.0] * 6
         self.last_data = [0.0] * 6
         self.is_calibrated = False
@@ -407,7 +400,6 @@ class GameEngine:
         self.bat_pct = 100
         self.last_bat_check = 0
 
-        # Pre-allocate dictionary payload to prevent allocation per request
         self.payload = {"p": 0.0, "bx": 50.0, "by": 50.0, "bat": 100}
 
     def calibrate(self):
@@ -449,7 +441,6 @@ class GameEngine:
         else:
             self.stable_frames = 0
 
-        # Copy data explicitly to last_data buffer
         for i in range(6):
             self.last_data[i] = data[i]
 
@@ -484,7 +475,6 @@ class GameEngine:
             self.last_bat_check = now
 
     def get_payload(self):
-        # Update pre-allocated dictionary instead of making a new one
         self.payload["p"] = self.accumulated_penalty
         self.payload["bx"] = self.bx
         self.payload["by"] = self.by
@@ -514,11 +504,22 @@ def setup_ap():
 def main():
     machine.freq(80000000)
 
+    # 1. Latch main hardware power ON
     power_hold = machine.Pin(4, machine.Pin.OUT)
     power_hold.value(1)
 
+    # 2. BOOT FEEDBACK: Turn screen fully ON for 1.5 seconds, then OFF
     backlight = machine.Pin(27, machine.Pin.OUT)
+    backlight.value(1)
+    time.sleep(1.5)
     backlight.value(0)
+
+    # 3. Setup tiny Red LED (Pin 19) for heartbeat (Active High correction)
+    status_led = machine.Pin(19, machine.Pin.OUT)
+    status_led.value(0)  # Baseline OFF
+
+    # 4. Setup the big front 'M5' button (Pin 37) for soft-shutdown
+    btn_m5 = machine.Pin(37, machine.Pin.IN, machine.Pin.PULL_UP)
 
     i2c = machine.I2C(0, scl=machine.Pin(22), sda=machine.Pin(21), freq=100000)
     imu = MPU6886(i2c)
@@ -533,22 +534,35 @@ def main():
     s.listen(5)
     s.setblocking(False)
 
+    poller = select.poll()
+    poller.register(s, select.POLLIN)
+
+    client_conn = None
+    req_count = 0
+
+    last_engine_update = time.ticks_ms()
     last_heartbeat = time.ticks_ms()
+
+    # Pre-bake static responses to save RAM
     HTML_BYTES = HTML_PAGE.encode("utf-8")
+    HTTP_HTML_FULL = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s"
+        % (len(HTML_BYTES), HTML_BYTES)
+    )
+    HTTP_CALIB_FULL = (
+        b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nOK"
+    )
 
     print("-" * 40)
-    print("🚀 Equilibrium Game Server is UP and RUNNING!")
+    print("🚀 Equilibrium Game Server is UP!")
     print("📡 Wi-Fi SSID: Equilibrium_M5")
     print("🌐 Connect to: http://{}".format(ip_address))
     print("-" * 40)
 
-    req_count = 0 
-    last_engine_update = time.ticks_ms()
-    client_conn = None # Track our single persistent connection
-
     while True:
+        # 1. Update Engine (Priority Timing)
         now = time.ticks_ms()
-        if time.ticks_diff(now, last_engine_update) >= 20: 
+        if time.ticks_diff(now, last_engine_update) >= 20:
             engine.update()
             last_engine_update = now
 
@@ -570,55 +584,75 @@ def main():
             while True:
                 pass
 
-        # 2. We have an active connection, try to read from it
-        try:
-            request = client_conn.recv(1024)
-            
-            # If recv returns empty bytes, the client cleanly disconnected
-            if request == b'':
-                client_conn.close()
-                client_conn = None
-                continue
-                
-            if b'GET /data' in request:
-                payload_bytes = json.dumps(engine.get_payload()).encode('utf-8')
-                
-                # CRITICAL FIX: Keep-Alive + Content-Length forces the browser to reuse the TCP socket
-                header = f'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: {len(payload_bytes)}\r\n\r\n'.encode('utf-8')
-                client_conn.sendall(header + payload_bytes)
-                
-                req_count += 1
-                if req_count > 50:
-                    gc.collect()
-                    req_count = 0
-                
-            elif b'GET /calibrate' in request:
-                engine.calibrate()
-                header = b'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nOK'
-                client_conn.sendall(header)
-                
-            elif b'GET / ' in request:
-                header = f'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: {len(HTML_BYTES)}\r\n\r\n'.encode('utf-8')
-                client_conn.sendall(header + HTML_BYTES)
-                # We close after serving HTML so the browser sets up a fresh keep-alive specifically for the JS fetch loop
-                client_conn.close()
-                client_conn = None
-                
-        except OSError as e:
-            # EAGAIN (11) or ETIMEDOUT (110) means the browser is just idle between the 80ms polls. We keep the socket alive!
-            if len(e.args) > 0 and e.args[0] in (11, 110):
-                pass
-            else:
-                # A different socket error (like ECONNRESET) means the connection broke
-                try: client_conn.close()
-                except: pass
-                client_conn = None
-                
-        except Exception:
-            # Catch-all for unexpected parsing errors to keep the server alive
-            try: client_conn.close()
-            except: pass
-            client_conn = None
+        # 2. Check for network events
+        events = poller.poll(0)
+
+        for sock, ev in events:
+            if sock == s:
+                try:
+                    new_conn, addr = s.accept()
+                    # FIX 1: Use a 500ms timeout instead of strict non-blocking
+                    # This gives the ESP32 enough time to flush the 8KB HTML to the browser
+                    new_conn.settimeout(0.5)
+
+                    if client_conn:
+                        poller.unregister(client_conn)
+                        try:
+                            client_conn.close()
+                        except:
+                            pass
+
+                    client_conn = new_conn
+                    poller.register(client_conn, select.POLLIN)
+                except OSError:
+                    pass
+
+            elif sock == client_conn:
+                try:
+                    request = client_conn.recv(1024)
+
+                    if not request:
+                        poller.unregister(client_conn)
+                        client_conn.close()
+                        client_conn = None
+                        continue
+
+                    if b"GET /data" in request:
+                        payload_bytes = json.dumps(engine.get_payload()).encode("utf-8")
+                        response = (
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: %d\r\n\r\n%s"
+                            % (len(payload_bytes), payload_bytes)
+                        )
+                        client_conn.sendall(response)
+
+                        req_count += 1
+                        if req_count > 50:
+                            gc.collect()
+                            req_count = 0
+
+                    elif b"GET /calibrate" in request:
+                        engine.calibrate()
+                        client_conn.sendall(HTTP_CALIB_FULL)
+
+                    elif b"GET / " in request:
+                        client_conn.sendall(HTTP_HTML_FULL)
+                        poller.unregister(client_conn)
+                        client_conn.close()
+                        client_conn = None
+
+                    else:
+                        # FIX 2: Catch favicon and unknown requests to prevent Keep-Alive stalls
+                        poller.unregister(client_conn)
+                        client_conn.close()
+                        client_conn = None
+
+                except Exception:
+                    poller.unregister(client_conn)
+                    try:
+                        client_conn.close()
+                    except:
+                        pass
+                    client_conn = None
 
 
 if __name__ == "__main__":
