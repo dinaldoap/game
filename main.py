@@ -533,13 +533,7 @@ def main():
     s.listen(5)
     s.setblocking(False)
 
-    # --- PRE-ALLOCATED STATIC BYTE STRINGS ---
-    # Stops strings/bytes from being generated on every socket request
-    HTTP_JSON = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
-    HTTP_CALIB = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK"
-    HTTP_HTML = (
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-    )
+    last_heartbeat = time.ticks_ms()
     HTML_BYTES = HTML_PAGE.encode("utf-8")
 
     print("-" * 40)
@@ -558,14 +552,23 @@ def main():
             engine.update()
             last_engine_update = now
 
-        # 1. Accept a new connection ONLY if we don't have one active
-        if client_conn is None:
-            try:
-                client_conn, addr = s.accept()
-                client_conn.settimeout(0.02)  # 20ms timeout for non-blocking reads
-            except OSError:
-                time.sleep_ms(5)
-                continue
+        # --- HEARTBEAT (Am I on?) ---
+        if time.ticks_diff(now, last_heartbeat) >= 2000:
+            status_led.value(1)
+            time.sleep_ms(10)
+            status_led.value(0)
+            last_heartbeat = now
+
+        # --- SHUTDOWN SEQUENCE ---
+        if btn_m5.value() == 0:
+            for _ in range(3):
+                backlight.value(1)
+                time.sleep_ms(150)
+                backlight.value(0)
+                time.sleep_ms(150)
+            power_hold.value(0)
+            while True:
+                pass
 
         # 2. We have an active connection, try to read from it
         try:
