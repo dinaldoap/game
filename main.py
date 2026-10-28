@@ -59,8 +59,8 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
     <div class="container">
         <div class="card">
-            <h1>Run Biomechanics <sup class="version-badge">v0.0.5</sup></h1>
-            <p>Place device in central back pocket. (Logs at 100Hz, Auto-stops at 3m)</p>
+            <h1>Run Biomechanics <sup class="version-badge">v0.0.6</sup></h1>
+            <p>Place device in central back pocket. (Logs at 100Hz, Auto-stops at ~3m)</p>
             <div id="status-text" class="status-indicator">Status: Idle</div>
             <div id="time-recorded-text" class="time-indicator">Time Recorded: 0m 0s</div>
             
@@ -183,6 +183,7 @@ HTML_PAGE = """<!DOCTYPE html>
             }
             
             isRecording = true;
+            isSaving = false;
             isCountingDown = false; 
             isCommandPending = false; 
             renderStateMachine();
@@ -254,7 +255,7 @@ class MPU6886:
             self.connected = False
 
 # ==========================================
-# EDGE COMPUTING - ASYNC CHUNKED RAM LOGGER
+# EDGE COMPUTING - ASYNC MICRO-STEPPED LOGGER
 # ==========================================
 class DataLogger:
     def __init__(self, imu, pmic):
@@ -270,7 +271,7 @@ class DataLogger:
         
         self.SAMPLE_SIZE = 18 
         self.CHUNK_SAMPLES = 500
-        self.MAX_RECORD_SAMPLES = 18000 # Limite rígido de 3 minutos (18.000 amostras a 100Hz)
+        self.MAX_RECORD_SAMPLES = 18000 # Limite rígido de 3 minutos
         
         self.buffers = []
         self.max_samples = 0
@@ -283,6 +284,7 @@ class DataLogger:
         # Async Dump Tracking
         self.dump_file = None
         self.dump_chunk_idx = 0
+        self.dump_sample_idx = 0 # Adicionado para Micro-stepping
         
         self.update_ram_stats()
 
@@ -304,7 +306,6 @@ class DataLogger:
             
         elapsed = time.ticks_diff(current_time_ms, self.start_time)
         
-        # Encerra automaticamente se estourar o limite de 3 minutos
         if self.current_idx >= self.max_samples:
             self.auto_stop_flag = True
             return
@@ -334,8 +335,6 @@ class DataLogger:
         
         num_chunks_possible = safe_ram // (self.CHUNK_SAMPLES * self.SAMPLE_SIZE)
         num_chunks_needed = (self.MAX_RECORD_SAMPLES // self.CHUNK_SAMPLES) + 1
-        
-        # Aloca apenas o suficiente para os 3 minutos (ou o que a RAM permitir, se for menor)
         num_chunks = min(num_chunks_possible, num_chunks_needed)
         
         self.buffers = []
@@ -367,6 +366,7 @@ class DataLogger:
     def _start_async_dump(self):
         self.is_saving = True
         self.dump_chunk_idx = 0
+        self.dump_sample_idx = 0
         try:
             self.dump_file = open(self.filename, "w")
             self.dump_file.write("time_ms,ax,ay,az,gx,gy,gz\n")
@@ -375,6 +375,7 @@ class DataLogger:
             self._cleanup()
 
     def process_dump_step(self):
+        """Micro-stepping: Processa apenas 50 linhas por ciclo para não travar a CPU e o Wi-Fi"""
         if not self.dump_file or not self.buffers:
             self._cleanup()
             return
@@ -390,7 +391,8 @@ class DataLogger:
         samples_in_chunk = self.CHUNK_SAMPLES
         if chunk_idx == self.current_idx // self.CHUNK_SAMPLES:
             samples_in_chunk = self.current_idx % self.CHUNK_SAMPLES
-        elif chunk_idx > self.current_idx // self.CHUNK_SAMPLES:
+            
+        if chunk_idx > self.current_idx // self.CHUNK_SAMPLES or samples_in_chunk == 0:
             self.dump_file.close()
             self._cleanup()
             return
@@ -403,8 +405,12 @@ class DataLogger:
             return val if val < 32768 else val - 65536
 
         chunk_str = []
-        for i in range(samples_in_chunk):
-            offset = i * self.SAMPLE_SIZE
+        
+        # PROCESSA NO MÁXIMO 50 LINHAS POR CICLO (Rápido o suficiente para o Wi-Fi não cair)
+        lines_to_process = min(50, samples_in_chunk - self.dump_sample_idx)
+        
+        for _ in range(lines_to_process):
+            offset = self.dump_sample_idx * self.SAMPLE_SIZE
             elapsed, raw = struct.unpack_from("<L14s", buf, offset)
             
             ax = to_signed(raw[0], raw[1]) / a_res
@@ -415,16 +421,17 @@ class DataLogger:
             gz = to_signed(raw[12], raw[13]) / g_res
             
             chunk_str.append("{},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f}\n".format(elapsed, ax, ay, az, gx, gy, gz))
+            self.dump_sample_idx += 1
             
-            if len(chunk_str) >= 100:
-                self.dump_file.write("".join(chunk_str))
-                chunk_str = []
-                
         if chunk_str:
             self.dump_file.write("".join(chunk_str))
             
-        self.dump_chunk_idx += 1
-        
+        # Move para o próximo chunk se esse acabou
+        if self.dump_sample_idx >= samples_in_chunk:
+            self.dump_chunk_idx += 1
+            self.dump_sample_idx = 0
+            
+        # Verifica se o processo total terminou
         if self.dump_chunk_idx >= len(self.buffers) or self.dump_chunk_idx > (self.current_idx // self.CHUNK_SAMPLES):
             self.dump_file.close()
             self._cleanup()
@@ -437,7 +444,6 @@ class DataLogger:
         self.update_ram_stats()
 
     def process_background_tasks(self, current_time_ms):
-        # Escuta o gatilho de limite atingido
         if self.auto_stop_flag:
             self.stop()
             self.auto_stop_flag = False
