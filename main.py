@@ -43,13 +43,16 @@ HTML_PAGE = """<!DOCTYPE html>
         .btn-stop { background-color: var(--danger); }
         .btn-download { background-color: var(--primary); }
         
-        .status-bar { position: absolute; top: 15px; width: 100%; padding: 0 15px; display: flex; justify-content: space-between; z-index: 100; pointer-events: none; }
+        .status-bar { position: absolute; top: 15px; width: 100%; padding: 0 15px; display: flex; justify-content: space-between; align-items: flex-start; z-index: 100; pointer-events: none; }
+        .right-badges { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
         .badge-ui { background: rgba(0,0,0,0.5); padding: 5px 12px; border-radius: 20px; font-size: 0.9rem; font-weight: bold; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+        
         .wifi-status { color: #4ade80; }
         .bat-status { color: var(--accent); }
+        .storage-status { color: var(--accent); }
         
         .status-indicator { margin-top: 10px; font-size: 1.2rem; font-weight: bold; color: var(--muted); }
-        .storage-indicator { margin-top: 5px; font-size: 0.9rem; color: var(--accent); margin-bottom: 15px; }
+        .time-indicator { margin-top: 5px; font-size: 0.9rem; color: var(--accent); margin-bottom: 15px; }
         .recording-pulse { color: var(--danger); animation: pulse 1.5s infinite; }
         
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
@@ -58,7 +61,10 @@ HTML_PAGE = """<!DOCTYPE html>
 <body>
     <div class="status-bar">
         <div id="wifi-status" class="badge-ui wifi-status">🟢 Connected</div>
-        <div id="bat-status" class="badge-ui bat-status">🔋 --%</div>
+        <div class="right-badges">
+            <div id="bat-status" class="badge-ui bat-status">🔋 --%</div>
+            <div id="storage-status" class="badge-ui storage-status">💾 --%</div>
+        </div>
     </div>
 
     <div class="container">
@@ -67,7 +73,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <p>Place device in central back pocket. (Logs at ~100Hz)</p>
             
             <div id="status-text" class="status-indicator">Status: Idle</div>
-            <div id="storage-text" class="storage-indicator">Calculating storage...</div>
+            <div id="time-recorded-text" class="time-indicator">Time Recorded: 0m 0s</div>
             
             <button id="btn-start" class="btn-start" onclick="startRecording()">START RECORDING</button>
             <button id="btn-stop" class="btn-stop" onclick="stopRecording()" style="display: none;">STOP RECORDING</button>
@@ -78,15 +84,17 @@ HTML_PAGE = """<!DOCTYPE html>
     <script>
         let isRecording = false;
         let hasData = false;
+        let isCountingDown = false;
         const wifiStatus = document.getElementById('wifi-status');
         const batStatus = document.getElementById('bat-status');
+        const storageStatus = document.getElementById('storage-status');
+        const timeRecordedText = document.getElementById('time-recorded-text');
 
         function formatTime(seconds) {
-            if (seconds <= 0) return "0m 0s (Storage Full)";
             let h = Math.floor(seconds / 3600);
             let m = Math.floor((seconds % 3600) / 60);
             let s = seconds % 60;
-            if (h > 0) return `${h}h ${m}m`;
+            if (h > 0) return `${h}h ${m}m ${s}s`;
             return `${m}m ${s}s`;
         }
 
@@ -105,6 +113,8 @@ HTML_PAGE = """<!DOCTYPE html>
         }
 
         async function updateStatus() {
+            if (isCountingDown) return; 
+            
             try {
                 let res = await fetch('/status', { signal: AbortSignal.timeout(2000) });
                 if (!res.ok) throw new Error("Network error");
@@ -114,17 +124,20 @@ HTML_PAGE = """<!DOCTYPE html>
                 isRecording = data.recording;
                 hasData = data.has_data;
                 
+                // Update Battery
                 batStatus.innerText = `🔋 ${data.bat}%`;
                 if (data.bat <= 20) batStatus.style.color = "#ef4444";
                 else batStatus.style.color = "var(--accent)";
                 
-                let storageElem = document.getElementById('storage-text');
-                storageElem.innerText = `Est. Time Left: ${formatTime(data.time_left)}`;
-                if (data.time_left < 300) { 
-                    storageElem.style.color = 'var(--warning)';
-                } else {
-                    storageElem.style.color = 'var(--accent)';
-                }
+                // Update Storage Percentage
+                storageStatus.innerText = `💾 ${data.storage_pct}%`;
+                if (data.storage_pct <= 10) storageStatus.style.color = "#ef4444";
+                else storageStatus.style.color = "var(--accent)";
+                
+                // Update Time Recorded
+                timeRecordedText.innerText = `Time Recorded: ${formatTime(data.elapsed_time)}`;
+                if (isRecording) timeRecordedText.style.color = "var(--danger)";
+                else timeRecordedText.style.color = "var(--accent)";
                 
                 let btnStart = document.getElementById('btn-start');
                 let btnStop = document.getElementById('btn-stop');
@@ -132,7 +145,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
                 if (isRecording) {
                     btnStart.style.display = 'none';
-                    btnStart.innerText = 'START RECORDING'; // Invisibly reset for next time
+                    btnStart.innerText = 'START RECORDING';
                     btnStart.disabled = false;
                     
                     btnStop.style.display = 'block';
@@ -144,13 +157,11 @@ HTML_PAGE = """<!DOCTYPE html>
                     document.getElementById('status-text').innerHTML = 'Status: <span class="recording-pulse">RECORDING...</span>';
                 } else {
                     btnStart.style.display = 'block';
-                    if (btnStart.innerText !== 'STARTING...') {
-                        btnStart.disabled = false;
-                        btnStart.innerText = 'START RECORDING';
-                    }
+                    btnStart.disabled = false;
+                    btnStart.innerText = 'START RECORDING';
                     
                     btnStop.style.display = 'none';
-                    btnStop.innerText = 'STOP RECORDING'; // Invisibly reset for next time
+                    btnStop.innerText = 'STOP RECORDING';
                     btnStop.disabled = false;
                     
                     btnDownload.disabled = !hasData;
@@ -168,15 +179,25 @@ HTML_PAGE = """<!DOCTYPE html>
                 }
             }
             
+            isCountingDown = true;
             let btnStart = document.getElementById('btn-start');
             btnStart.disabled = true;
-            btnStart.innerText = 'STARTING...';
+            
+            timeRecordedText.innerText = "Time Recorded: 0m 0s";
+            
+            for(let i = 3; i > 0; i--) {
+                btnStart.innerText = i + "...";
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            btnStart.innerText = "GO!";
+            await new Promise(resolve => setTimeout(resolve, 500));
             
             try {
                 await fetch('/start');
             } catch (e) {
                 console.error(e);
             }
+            isCountingDown = false;
             updateStatus();
         }
 
@@ -197,7 +218,7 @@ HTML_PAGE = """<!DOCTYPE html>
             window.location.href = '/download';
         }
 
-        setInterval(updateStatus, 2000);
+        setInterval(updateStatus, 1000); // Updated to 1000ms so the timer updates every second
         updateStatus();
     </script>
 </body>
@@ -284,27 +305,42 @@ class DataLogger:
         self.is_recording = False
         self.file = None
         self.start_time = 0
+        self.last_elapsed_sec = 0
         self.filename = "run_data.csv"
         
         self.bat_pct = 100
         self.last_slow_check = 0
         
+        # Buffer & Memory Protection settings
+        self.buffer = []
+        self.BUFFER_SIZE = 50           # Writes to Flash every 500ms (50 readings)
+        self.MAX_DURATION_MS = 180000   # 3 minutes maximum
+        self.MAX_LINES = 18000          # 100Hz * 60s * 3m = 18000
+        self.current_lines = 0
+        
         # Storage tracking
         self.SAFE_MARGIN_BYTES = 102400
-        self.BYTES_PER_SEC = 6400
         self.free_bytes = 0
-        self.time_left_sec = 0
+        self.total_bytes = 1 # Avoid div by zero
+        self.storage_pct = 0
         self.update_storage_stats()
 
     def update_storage_stats(self):
         try:
             stats = os.statvfs('/')
-            self.free_bytes = stats[0] * stats[3]
-            usable_bytes = max(0, self.free_bytes - self.SAFE_MARGIN_BYTES)
-            self.time_left_sec = int(usable_bytes / self.BYTES_PER_SEC)
+            block_size = stats[0]
+            total_blocks = stats[2]
+            free_blocks = stats[3]
+            
+            self.total_bytes = block_size * total_blocks
+            self.free_bytes = block_size * free_blocks
+            
+            if self.total_bytes > 0:
+                self.storage_pct = int((self.free_bytes / self.total_bytes) * 100)
         except Exception:
             self.free_bytes = 0
-            self.time_left_sec = 0
+            self.total_bytes = 1
+            self.storage_pct = 0
 
     def start(self):
         if self.is_recording:
@@ -317,6 +353,9 @@ class DataLogger:
         try:
             self.file = open(self.filename, "w")
             self.file.write("time_ms,ax,ay,az,gx,gy,gz\n")
+            self.buffer = []
+            self.current_lines = 0
+            self.last_elapsed_sec = 0
             self.is_recording = True
             self.start_time = time.ticks_ms()
         except Exception as e:
@@ -324,18 +363,25 @@ class DataLogger:
 
     def stop(self):
         self.is_recording = False
+        if self.start_time > 0:
+            self.last_elapsed_sec = time.ticks_diff(time.ticks_ms(), self.start_time) // 1000
+            
         if self.file:
             try:
+                # Flush remaining buffer before closing
+                if len(self.buffer) > 0:
+                    self.file.write("".join(self.buffer))
+                    self.buffer = []
+                self.file.flush()
                 self.file.close()
-            except:
-                pass
+            except Exception as e:
+                print("Error closing file:", e)
             self.file = None
         self.update_storage_stats()
+        gc.collect()
 
-    def update(self):
-        now = time.ticks_ms()
-        
-        if time.ticks_diff(now, self.last_slow_check) > 5000:
+    def update(self, current_time_ms):
+        if time.ticks_diff(current_time_ms, self.last_slow_check) > 5000:
             self.bat_pct = self.pmic.get_battery_level()
             self.update_storage_stats()
             
@@ -343,16 +389,30 @@ class DataLogger:
                 print("Safety Margin Hit! Auto-stopping recording.")
                 self.stop()
                 
-            self.last_slow_check = now
+            self.last_slow_check = current_time_ms
 
         if self.is_recording and self.file:
-            t = time.ticks_diff(now, self.start_time)
-            data = self.imu.get_data()
-            try:
-                self.file.write("{},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f}\n".format(t, *data))
-            except Exception as e:
-                print("Write error:", e)
+            t = time.ticks_diff(current_time_ms, self.start_time)
+            
+            # Auto-Stop trigger
+            if t >= self.MAX_DURATION_MS or self.current_lines >= self.MAX_LINES:
                 self.stop()
+                return
+                
+            data = self.imu.get_data()
+            
+            # Append string to RAM list instead of writing directly to flash
+            self.buffer.append("{},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f}\n".format(t, *data))
+            self.current_lines += 1
+            
+            # Flush to file in batches
+            if len(self.buffer) >= self.BUFFER_SIZE:
+                try:
+                    self.file.write("".join(self.buffer))
+                    self.buffer = []
+                except Exception as e:
+                    print("Write error:", e)
+                    self.stop()
 
     def has_data(self):
         try:
@@ -361,11 +421,17 @@ class DataLogger:
             return False
 
     def get_status(self):
+        if self.is_recording:
+            elapsed = time.ticks_diff(time.ticks_ms(), self.start_time) // 1000
+        else:
+            elapsed = self.last_elapsed_sec
+            
         return {
             "recording": self.is_recording,
             "has_data": self.has_data(),
             "bat": self.bat_pct,
-            "time_left": self.time_left_sec
+            "storage_pct": self.storage_pct,
+            "elapsed_time": elapsed
         }
 
 # ==========================================
@@ -400,7 +466,7 @@ def main():
     pmic = StickPlus2Battery()
     logger = DataLogger(imu, pmic)
 
-    ip_address = setup_ap()
+    setup_ap()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -422,9 +488,11 @@ def main():
     while True:
         now = time.ticks_ms()
         
+        # Strict Timing: Use ticks_diff against an advancing deadline (no drift)
         if time.ticks_diff(now, last_engine_update) >= 10:
-            logger.update()
-            last_engine_update = now
+            logger.update(now)
+            # Advance exactly 10ms from the last schedule, ensuring long-term 100Hz precision
+            last_engine_update = time.ticks_add(last_engine_update, 10)
 
         if time.ticks_diff(now, last_heartbeat) >= (500 if logger.is_recording else 2000):
             status_led.value(1)
